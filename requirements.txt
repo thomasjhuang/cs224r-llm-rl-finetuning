@@ -1,0 +1,13 @@
+torch>=2.0.0
+transformers>=4.38.0
+datasets>=2.15.0
+accelerate>=0.25.0
+peft>=0.7.0
+# vllm # Optional: for faster inference, install separately based on CUDA version if needed https://docs.vllm.ai/en/latest/getting_started/installation.html
+openai>=1.0.0
+huggingface_hub>=0.20.0
+tqdm>=4.66.0
+PyYAML>=6.0
+tensorboard # For logging training progress
+# bitsandbytes # For 8-bit/4-bit quantization if needed
+# deepspeed # For distributed training if needed
