@@ -12,20 +12,27 @@ The primary goal of the initial implementation is to:
 
 ## Setup Instructions
 
-1.  **Create a Virtual Environment** (recommended):
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate 
-    ```
-2.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-3.  **Hugging Face Login** (if needed for specific models/datasets, though Qwen 2.5 0.5B is public):
+### Conda Setup
+
+1. **Create and activate a conda environment**:
+   ```bash
+   # Make the setup script executable
+   chmod +x setupenv.sh
+   
+   # Run the setup script
+   ./setupenv.sh
+   
+   # After the script completes, activate the environment
+   conda activate cs224r-rl-finetuning
+   ```
+
+### Additional Setup
+
+1.  **Hugging Face Login** 
     ```bash
     huggingface-cli login
     ```
-4.  **NVIDIA API Key for Nemotron Reward Model** (for UltraFeedback evaluation):
+2.  **NVIDIA API Key for Nemotron Reward Model** (for UltraFeedback evaluation):
     - Obtain an API key from [NVIDIA's Llama-3.1-Nemotron-70B-Reward page](https://huggingface.co/nvidia/Llama-3.1-Nemotron-70B-Reward).
     - Set it as an environment variable or manage it securely:
       ```bash
