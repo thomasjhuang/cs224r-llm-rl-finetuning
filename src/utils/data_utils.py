@@ -1,30 +1,80 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Any
 import torch
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from datasets import Dataset
+from transformers import PreTrainedTokenizerBase
 
 @dataclass
 class DataCollatorForSFT:
     """Data collator for supervised fine-tuning."""
     tokenizer: PreTrainedTokenizerBase
-    max_length: int = 1024
-    
-    def __call__(self, instances: List[Dict]) -> Dict[str, torch.Tensor]:
-        """Collate function for SFT data."""
-        input_ids = [instance["input_ids"][:self.max_length] for instance in instances]
-        labels = [instance["labels"][:self.max_length] for instance in instances]
-        
-        # Pad sequences
+    padding: Union[bool, str] = True
+    max_length: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+    label_pad_token_id: int = -100 # Standard ignore index for labels
+    return_tensors: str = "pt"
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        processed_labels_list = []
+        # Check if labels are present in the first feature and process them all if so.
+        # Assumes consistent structure across features in a batch.
+        first_feature_labels = features[0].get("labels") if features else None
+        has_labels = first_feature_labels is not None
+
+        if has_labels:
+            for feature_dict in features:
+                label_val = feature_dict.get("labels")
+                if isinstance(label_val, torch.Tensor):
+                    processed_labels_list.append(label_val.squeeze().tolist())
+                elif isinstance(label_val, list):
+                    processed_labels_list.append(label_val)
+                # If label_val is None here (e.g. missing for one item), it would error later or lead to misaligned batch.
+                # Current SFTDataset ensures all items have 'labels'.
+
+        features_to_pad = []
+        for feature_dict_original in features:
+            item_for_padder = {}
+            for key, value in feature_dict_original.items():
+                if key == "labels":
+                    continue
+                
+                if isinstance(value, torch.Tensor):
+                    # Squeeze to handle both [N] and [1,N] tensors to get a 1D list
+                    item_for_padder[key] = value.squeeze().tolist()
+                elif isinstance(value, list):
+                    item_for_padder[key] = value
+                else:
+                    # For other types, pass as is; tokenizer.pad might handle or raise error
+                    item_for_padder[key] = value 
+            features_to_pad.append(item_for_padder)
+
         batch = self.tokenizer.pad(
-            {"input_ids": input_ids, "labels": labels},
-            padding="longest",
+            features_to_pad,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
             return_tensors="pt",
         )
-        
-        # Create attention mask
-        batch["attention_mask"] = batch["input_ids"].ne(self.tokenizer.pad_token_id).long()
-        
+        # Ensure labels were found and processed
+        if has_labels and processed_labels_list: 
+            # Determine target length for labels based on padding strategy for input_ids
+            target_len_for_labels = batch["input_ids"].shape[1]
+            if self.padding == "max_length" and self.max_length is not None:
+                target_len_for_labels = self.max_length
+            
+            manually_padded_labels = []
+            for label_list in processed_labels_list:
+                len_label = len(label_list)
+                if len_label < target_len_for_labels:
+                    padding_needed = target_len_for_labels - len_label
+                    manually_padded_labels.append(label_list + [self.label_pad_token_id] * padding_needed)
+                elif len_label > target_len_for_labels:
+                    manually_padded_labels.append(label_list[:target_len_for_labels])
+                else:
+                    manually_padded_labels.append(label_list)
+            # Ensure labels were found and processed
+            if manually_padded_labels:
+                batch["labels"] = torch.tensor(manually_padded_labels, dtype=torch.long)
+            
         return batch
 
 @dataclass
@@ -32,25 +82,44 @@ class DataCollatorForDPO:
     """Data collator for DPO training."""
     tokenizer: PreTrainedTokenizerBase
     max_length: int = 1024
-    
+
     def __call__(self, instances: List[Dict]) -> Dict[str, torch.Tensor]:
         """Collate function for DPO data."""
-        # Extract chosen and rejected inputs
-        chosen_inputs = [{"input_ids": inst["chosen_input_ids"], "attention_mask": [1] * len(inst["chosen_input_ids"])} for inst in instances]
-        rejected_inputs = [{"input_ids": inst["rejected_input_ids"], "attention_mask": [1] * len(inst["rejected_input_ids"])} for inst in instances]
+        processed_chosen_inputs = []
+        processed_rejected_inputs = []
+
+        for inst in instances:
+            # Ensure input_ids are lists for len() and for tokenizer.pad()
+            chosen_ids_list = inst["chosen_input_ids"]
+            if isinstance(chosen_ids_list, torch.Tensor):
+                 # Squeeze to 1D if it's [1,N]
+                chosen_ids_list = chosen_ids_list.squeeze().tolist()
+            
+            rejected_ids_list = inst["rejected_input_ids"]
+            if isinstance(rejected_ids_list, torch.Tensor):
+                rejected_ids_list = rejected_ids_list.squeeze().tolist()
+
+            processed_chosen_inputs.append({
+                "input_ids": chosen_ids_list,
+                "attention_mask": [1] * len(chosen_ids_list) 
+            })
+            processed_rejected_inputs.append({
+                "input_ids": rejected_ids_list,
+                "attention_mask": [1] * len(rejected_ids_list)
+            })
         
         # Pad and truncate
-        def prepare_inputs(inputs):
+        def prepare_inputs(inputs_list_of_dicts):
             return self.tokenizer.pad(
-                inputs,
+                inputs_list_of_dicts,
                 padding="max_length",
                 max_length=self.max_length,
                 return_tensors="pt",
                 pad_to_multiple_of=8,
             )
         
-        chosen_batch = prepare_inputs(chosen_inputs)
-        rejected_batch = prepare_inputs(rejected_inputs)
+        chosen_batch = prepare_inputs(processed_chosen_inputs)
+        rejected_batch = prepare_inputs(processed_rejected_inputs)
         
         return {
             "chosen_input_ids": chosen_batch["input_ids"],
@@ -75,12 +144,10 @@ def apply_chat_template(
 def tokenize_with_template(
     tokenizer: PreTrainedTokenizerBase,
     prompt: str,
-    completion: str = "",
-    max_length: int = 1024,
-    truncation: bool = True,
-    padding: bool = False
-) -> Dict[str, torch.Tensor]:
-    """Tokenize input with chat template."""
+    completion: Optional[str] = None,
+    max_length: Optional[int] = None,
+    return_tensors: Optional[str] = None
+) -> Dict[str, Any]:
     messages = [
         {"role": "user", "content": prompt},
     ]
@@ -92,9 +159,10 @@ def tokenize_with_template(
     tokenized = tokenizer(
         text,
         max_length=max_length,
-        truncation=truncation,
-        padding=padding,
-        return_tensors="pt" if padding else None,
+        truncation=True,
+        padding=False, 
+        return_attention_mask=True,
+        return_tensors=return_tensors
     )
     
     # For training, we need to create labels (shifted input_ids)
