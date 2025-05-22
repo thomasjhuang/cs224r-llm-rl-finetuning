@@ -129,14 +129,14 @@ cython_debug/
 # *.parquet
 
 # Model checkpoints and logs - These should definitely be ignored
-models/
-runs/
-logs/
-results/
-checkpoints/
-output/
-outputs/
-saved_models/
+/models/
+/runs/
+/logs/
+/results/
+/checkpoints/
+/output/
+/outputs/
+/saved_models/
 
 # OS-specific files
 .DS_Store
