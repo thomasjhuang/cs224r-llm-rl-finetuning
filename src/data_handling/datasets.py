@@ -15,7 +15,7 @@ class SFTDataset(Dataset):
         tokenizer: PreTrainedTokenizerBase,
         split: str = "train",
         max_length: int = 1024,
-        subset: Optional[str] = None,
+        subset: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -46,6 +46,7 @@ class SFTDataset(Dataset):
             prompt=prompt,
             completion=completion,
             max_length=self.max_length,
+            return_tensors="pt"
         )
         
         return tokenized
@@ -76,29 +77,43 @@ class DPODataset(Dataset):
         """Get a single training example."""
         example = self.dataset[idx]
         
-        if "prompt" in example and "chosen" in example and "rejected" in example:
-            prompt = example["prompt"]
-            chosen = example["chosen"]
-            rejected = example["rejected"]
-        else:
-            raise ValueError(f"Unsupported dataset format: {example.keys()}")
+        # The ultrafeedback dataset has prompt as a string,
+        # but chosen/rejected as a list of message dicts.
+        # We need to extract the content string.
+        try:
+            prompt_str = example["prompt"]
+            
+            chosen_messages = example["chosen"]
+            if not isinstance(chosen_messages, list) or not chosen_messages or not isinstance(chosen_messages[0], dict) or "content" not in chosen_messages[0]:
+                raise ValueError(f"Unexpected format for 'chosen' in example: {chosen_messages}")
+            chosen_completion_str = chosen_messages[0]["content"]
+
+            rejected_messages = example["rejected"]
+            if not isinstance(rejected_messages, list) or not rejected_messages or not isinstance(rejected_messages[0], dict) or "content" not in rejected_messages[0]:
+                raise ValueError(f"Unexpected format for 'rejected' in example: {rejected_messages}")
+            rejected_completion_str = rejected_messages[0]["content"]
+            
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(f"Error parsing DPO example: {example}. Original error: {e}")
         
         chosen_tokenized = tokenize_with_template(
             tokenizer=self.tokenizer,
-            prompt=prompt,
-            completion=chosen,
+            prompt=prompt_str,
+            completion=chosen_completion_str,
             max_length=self.max_length,
+            return_tensors="pt"
         )
         
         rejected_tokenized = tokenize_with_template(
             tokenizer=self.tokenizer,
-            prompt=prompt,
-            completion=rejected,
+            prompt=prompt_str,
+            completion=rejected_completion_str,
             max_length=self.max_length,
+            return_tensors="pt"
         )
         
         return {
-            "prompt": prompt,
+            "prompt": prompt_str,
             "chosen_input_ids": chosen_tokenized["input_ids"],
             "rejected_input_ids": rejected_tokenized["input_ids"],
         }
@@ -129,7 +144,7 @@ class CountdownDataset(Dataset):
         """Get a single training example."""
         example = self.dataset[idx]
         
-        numbers = example["numbers"]
+        numbers = example["nums"]
         target = example["target"]
         prompt = f"Given the numbers {', '.join(map(str, numbers))}, reach the target {target} using each number exactly once with basic arithmetic operations (+, -, *, /)."
         
@@ -138,6 +153,7 @@ class CountdownDataset(Dataset):
                 tokenizer=self.tokenizer,
                 prompt=prompt,
                 max_length=self.max_length,
+                return_tensors="pt"
             )
             return {
                 "prompt": prompt,

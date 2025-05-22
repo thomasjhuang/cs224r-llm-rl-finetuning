@@ -29,6 +29,7 @@ SMOLTALK_CONFIG = DatasetConfig(
 
 ULTRAFEEDBACK_CONFIG = DatasetConfig(
     name="HuggingFaceH4/ultrafeedback_binarized",
+    split="train_prefs",
     max_length=1024,
     batch_size=4,
 )

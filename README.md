@@ -23,7 +23,7 @@ The primary goal of the initial implementation is to:
    ./setupenv.sh
    
    # After the script completes, activate the environment
-   conda activate cs224r-rl-finetuning
+   conda activate cs224r-project
    ```
 
 ### Additional Setup
