@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ENV_NAME="cs224r-project"
-PYTHON_VERSION="3.10"
+PYTHON_VERSION="3.12"
 
 PLATFORM=$(uname -s)
 ARCH=$(uname -m)
