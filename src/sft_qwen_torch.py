@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, math, argparse, logging, time
 from functools import partial
-
+import wandb
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset, disable_caching
@@ -60,11 +60,7 @@ def parse_args():
 def main():
     args = parse_args()
     os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
-    try:
-        import wandb
-        wandb.init(project=args.wandb_project, config=vars(args))
-    except Exception:
-        wandb = None
+    wandb.init(project=args.wandb_project, config=vars(args))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True); tok.pad_token = tok.eos_token
