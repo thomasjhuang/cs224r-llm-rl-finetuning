@@ -101,10 +101,10 @@ def main():
     def evaluate():
         pct_str = ("%g" % args.eval_pct)
         try:
-            raw_eval = load_dataset(args.dataset_name, split=f"train[:{pct_str}%]")
+            raw_eval = load_dataset(args.dataset_name, split="test", streaming=True)
         except ValueError:
             n_take = int(total * args.eval_pct / 100)
-            raw_eval = load_dataset(args.dataset_name, split="train", streaming=True).take(n_take)
+            raw_eval = load_dataset(args.dataset_name, split="test", streaming=True).take(n_take)
 
         # Accumulate loss in plain Python loop to avoid map() writer issues
         total_loss, total_tok = 0.0, 0
