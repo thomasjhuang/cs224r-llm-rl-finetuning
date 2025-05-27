@@ -46,5 +46,5 @@ These scripts will typically be launched from the command line, using arguments 
 
 For example, to run an SFT experiment:
 ```bash
-python src/main_sft.py --config_file src/configs/sft_instruction_following.yaml
+bash src/sft_qwen.sh
 ```
