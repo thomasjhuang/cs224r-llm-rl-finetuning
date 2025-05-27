@@ -9,3 +9,4 @@ tqdm>=4.66.0
 PyYAML>=6.0
 tensorboard
 pytest
+wandb

@@ -56,13 +56,29 @@ def parse_args():
     p.add_argument("--wandb_project", default="qwen2-smoltalk-sft")
     return p.parse_args()
 
+def get_device(use_gpu):
+  if use_gpu:
+    # Check for CUDA (NVIDIA GPU)
+    if torch.cuda.is_available():
+      device = torch.device("cuda")
+      print("Using CUDA:", torch.cuda.get_device_name(0))
+
+    # Check for MPS (Metal Performance Shaders on macOS)
+    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+      device = torch.device("mps")
+      print("Using MPS")
+  else:
+    device = torch.device("cpu")
+
+  return device
+
 
 def main():
     args = parse_args()
     os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
     wandb.init(project=args.wandb_project, config=vars(args))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device(True)
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True); tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
@@ -84,7 +100,7 @@ def main():
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9,0.95), weight_decay=0.01)
     sched = get_cosine_schedule_with_warmup(optim, warmup, max_steps)
-    autocast_ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if torch.cuda.is_available() else torch.amp.autocast('cuda')
+    autocast_ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if torch.cuda.is_available() else torch.amp.autocast('cpu')
 
     run_loss, gstep, asteps = 0.0, 0, 0; start=time.time()
 
