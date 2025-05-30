@@ -46,8 +46,11 @@ class VLLMProcessor:
             }],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "top_p": 1.0,
-            "stop": None
+            "top_p": 0.9,
+            "stop": None,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0,
+            "repetition_penalty": 1.2
         }
 
         # Add model name if specified
