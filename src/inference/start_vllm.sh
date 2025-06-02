@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=1 vllm serve "anatal/qwen2_05_smol-smoltalk" --dtype=half --port 8002

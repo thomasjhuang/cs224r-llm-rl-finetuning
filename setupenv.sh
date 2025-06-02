@@ -23,8 +23,38 @@ else
 fi
 
 if ! command -v conda &> /dev/null; then
-    echo "Conda is not installed. Please install Miniconda or Anaconda first from https://docs.conda.io/en/latest/miniconda.html"
-    exit 1
+    echo "Conda is not installed. Installing Miniconda..."
+    
+    if [[ "$PLATFORM" == "Linux" ]]; then
+        MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+    elif [[ "$PLATFORM" == "Darwin" ]]; then
+        if [[ "$ARCH" == "arm64" ]]; then
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh"
+        else
+            MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh"
+        fi
+    else
+        echo "Unsupported platform: $PLATFORM"
+        exit 1
+    fi
+    
+    INSTALLER_NAME="miniconda_installer.sh"
+    echo "Downloading Miniconda installer..."
+    curl -L "$MINICONDA_URL" -o "$INSTALLER_NAME"
+    
+    echo "Installing Miniconda..."
+    bash "$INSTALLER_NAME" -b -p "$HOME/miniconda3"
+    rm "$INSTALLER_NAME"
+    
+    echo "Initializing conda..."
+    "$HOME/miniconda3/bin/conda" init bash
+    
+    export PATH="$HOME/miniconda3/bin:$PATH"
+    source "$HOME/.bashrc" 2>/dev/null || true
+    
+    echo "Conda installation completed!"
+else
+    echo "Conda is already installed."
 fi
 
 if conda env list | grep -q "^${ENV_NAME}\s"; then

@@ -9,3 +9,6 @@ tqdm>=4.66.0
 PyYAML>=6.0
 tensorboard
 pytest
+wandb>=0.16.0
+huggingface_hub[cli]>=0.20.0
+vllm>=0.3.0
