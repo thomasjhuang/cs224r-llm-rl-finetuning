@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 from datasets import load_dataset
 from transformers import PreTrainedTokenizerBase
 
-from ..utils.data_utils import tokenize_with_template
+from src.utils.data_utils import tokenize_with_template
 
 class SFTDataset(Dataset):
     """Dataset for supervised fine-tuning."""

@@ -138,6 +138,21 @@ cython_debug/
 /outputs/
 /saved_models/
 
+/qwen2_sft/
+/qwen2_dpo/
+/qwen2_rloo/
+/wandb/
+wandb/
+*_results.json
+ultrafeedback_results*.json
+countdown_results*.json
+
+/texts/
+*.tmp
+*.temp
+
+~/.cache/huggingface/
+
 # OS-specific files
 .DS_Store
 Thumbs.db
