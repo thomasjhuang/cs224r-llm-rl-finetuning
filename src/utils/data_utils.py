@@ -85,48 +85,43 @@ class DataCollatorForDPO:
 
     def __call__(self, instances: List[Dict]) -> Dict[str, torch.Tensor]:
         """Collate function for DPO data."""
-        processed_chosen_inputs = []
-        processed_rejected_inputs = []
-
+        batch_size = len(instances)
+        
+        chosen_input_ids = []
+        chosen_attention_mask = []
+        chosen_labels = []
+        rejected_input_ids = []
+        rejected_attention_mask = []
+        rejected_labels = []
+        
         for inst in instances:
-            # Ensure input_ids are lists for len() and for tokenizer.pad()
-            chosen_ids_list = inst["chosen_input_ids"]
-            if isinstance(chosen_ids_list, torch.Tensor):
-                 # Squeeze to 1D if it's [1,N]
-                chosen_ids_list = chosen_ids_list.squeeze().tolist()
+            chosen_input_ids.append(inst["chosen_input_ids"])
+            chosen_attention_mask.append(inst["chosen_attention_mask"])
+            chosen_labels.append(inst["chosen_labels"])
+            rejected_input_ids.append(inst["rejected_input_ids"])
+            rejected_attention_mask.append(inst["rejected_attention_mask"])
+            rejected_labels.append(inst["rejected_labels"])
+        
+        def pad_tensors(tensor_list, pad_value=0):
+            max_len = max(len(t) for t in tensor_list)
+            max_len = min(max_len, self.max_length)
             
-            rejected_ids_list = inst["rejected_input_ids"]
-            if isinstance(rejected_ids_list, torch.Tensor):
-                rejected_ids_list = rejected_ids_list.squeeze().tolist()
-
-            processed_chosen_inputs.append({
-                "input_ids": chosen_ids_list,
-                "attention_mask": [1] * len(chosen_ids_list) 
-            })
-            processed_rejected_inputs.append({
-                "input_ids": rejected_ids_list,
-                "attention_mask": [1] * len(rejected_ids_list)
-            })
-        
-        # Pad and truncate
-        def prepare_inputs(inputs_list_of_dicts):
-            return self.tokenizer.pad(
-                inputs_list_of_dicts,
-                padding="max_length",
-                max_length=self.max_length,
-                return_tensors="pt",
-                pad_to_multiple_of=8,
-            )
-        
-        chosen_batch = prepare_inputs(processed_chosen_inputs)
-        rejected_batch = prepare_inputs(processed_rejected_inputs)
+            padded = []
+            for tensor in tensor_list:
+                if len(tensor) > max_len:
+                    padded.append(tensor[:max_len])
+                else:
+                    padding = [pad_value] * (max_len - len(tensor))
+                    padded.append(torch.cat([tensor, torch.tensor(padding, dtype=tensor.dtype)]))
+            return torch.stack(padded)
         
         return {
-            "chosen_input_ids": chosen_batch["input_ids"],
-            "chosen_attention_mask": chosen_batch["attention_mask"],
-            "rejected_input_ids": rejected_batch["input_ids"],
-            "rejected_attention_mask": rejected_batch["attention_mask"],
-            "return_loss": True,
+            "chosen_input_ids": pad_tensors(chosen_input_ids, self.tokenizer.pad_token_id),
+            "chosen_attention_mask": pad_tensors(chosen_attention_mask, 0),
+            "chosen_labels": pad_tensors(chosen_labels, -100),
+            "rejected_input_ids": pad_tensors(rejected_input_ids, self.tokenizer.pad_token_id),
+            "rejected_attention_mask": pad_tensors(rejected_attention_mask, 0),
+            "rejected_labels": pad_tensors(rejected_labels, -100),
         }
 
 def apply_chat_template(

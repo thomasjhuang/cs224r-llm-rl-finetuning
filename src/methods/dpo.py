@@ -3,19 +3,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from transformers import PreTrainedModel
 
 class DPOMethod:
     def __init__(
         self,
-        model: PreTrainedModel,
-        ref_model: PreTrainedModel,
+        policy: PreTrainedModel,
+        reference_model: PreTrainedModel,
         beta: float = 0.1,
         device: Optional[torch.device] = None
     ):
-        self.model = model
-        self.ref_model = ref_model
+        self.policy = policy
+        self.reference_model = reference_model
         self.beta = beta
         
         if device is not None:
@@ -29,49 +29,78 @@ class DPOMethod:
         
         self.use_cuda_amp = self.device.type == "cuda"
         
-        for param in self.ref_model.parameters():
+        for param in self.reference_model.parameters():
             param.requires_grad = False
-        self.ref_model.eval()
+        self.reference_model.eval()
 
-    def get_log_probs(self, model: PreTrainedModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def _get_batch_logps(self, model_instance: PreTrainedModel, input_ids: torch.Tensor, attention_mask: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         if self.use_cuda_amp:
-            with torch.cuda.amp.autocast():
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                logits = outputs.logits
+            with torch.amp.autocast('cuda'):
+                outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask)
+                model_logits = outputs.logits
         else:
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
+            outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask)
+            model_logits = outputs.logits
             
-        log_probs = F.log_softmax(logits, dim=-1)
-        labels = input_ids[:, 1:].clone()
-        log_probs = log_probs[:, :-1, :]
+        assert model_logits.shape[:-1] == labels.shape
         
-        per_token_log_probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(2)
+        labels = labels[:, 1:].clone()
+        model_logits = model_logits[:, :-1, :]
+        loss_mask = (labels != -100)
         
-        mask = attention_mask[:, 1:].clone()
-        per_token_log_probs = per_token_log_probs * mask
+        labels[labels == -100] = 0
         
-        sequence_log_probs = per_token_log_probs.sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        per_token_log_probs = torch.gather(model_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+        per_token_log_probs = per_token_log_probs * loss_mask
+        sequence_log_probs = per_token_log_probs.sum(dim=1)
         
         return sequence_log_probs
 
-    def compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def compute_loss(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         chosen_input_ids = batch["chosen_input_ids"].to(self.device)
         chosen_attention_mask = batch["chosen_attention_mask"].to(self.device)
+        chosen_labels = batch["chosen_labels"].to(self.device)
         rejected_input_ids = batch["rejected_input_ids"].to(self.device)
         rejected_attention_mask = batch["rejected_attention_mask"].to(self.device)
+        rejected_labels = batch["rejected_labels"].to(self.device)
 
-        policy_chosen_log_probs = self.get_log_probs(self.model, chosen_input_ids, chosen_attention_mask)
-        policy_rejected_log_probs = self.get_log_probs(self.model, rejected_input_ids, rejected_attention_mask)
+        policy_chosen_logps = self._get_batch_logps(self.policy, chosen_input_ids, chosen_attention_mask, chosen_labels)
+        policy_rejected_logps = self._get_batch_logps(self.policy, rejected_input_ids, rejected_attention_mask, rejected_labels)
 
         with torch.no_grad():
-            ref_chosen_log_probs = self.get_log_probs(self.ref_model, chosen_input_ids, chosen_attention_mask)
-            ref_rejected_log_probs = self.get_log_probs(self.ref_model, rejected_input_ids, rejected_attention_mask)
+            reference_chosen_logps = self._get_batch_logps(self.reference_model, chosen_input_ids, chosen_attention_mask, chosen_labels)
+            reference_rejected_logps = self._get_batch_logps(self.reference_model, rejected_input_ids, rejected_attention_mask, rejected_labels)
 
-        policy_chosen_ratio = policy_chosen_log_probs - ref_chosen_log_probs
-        policy_rejected_ratio = policy_rejected_log_probs - ref_rejected_log_probs
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
 
-        logits = self.beta * (policy_chosen_ratio - policy_rejected_ratio)
-        loss = -F.logsigmoid(logits).mean()
+        logits = pi_logratios - ref_logratios
 
-        return loss
+        loss = -F.logsigmoid(self.beta * logits).mean()
+
+        # Add debugging metrics
+        with torch.no_grad():
+            policy_chosen_logps_minus_ref = policy_chosen_logps - reference_chosen_logps
+            policy_rejected_logps_minus_ref = policy_rejected_logps - reference_rejected_logps
+            
+            policy_chosen_logps_mean = policy_chosen_logps.mean()
+            policy_rejected_logps_mean = policy_rejected_logps.mean()
+            reference_chosen_logps_mean = reference_chosen_logps.mean()
+            reference_rejected_logps_mean = reference_rejected_logps.mean()
+
+            chosen_rewards_val = self.beta * policy_chosen_logps_minus_ref
+            rejected_rewards_val = self.beta * policy_rejected_logps_minus_ref
+            
+        metrics = {
+            "logits_std": logits.std().item(),
+            "policy_chosen_logp": policy_chosen_logps_mean.item(),
+            "policy_rejected_logp": policy_rejected_logps_mean.item(),
+            "ref_chosen_logp": reference_chosen_logps_mean.item(),
+            "ref_rejected_logp": reference_rejected_logps_mean.item(),
+            "chosen_rewards_mean": chosen_rewards_val.mean().item(),
+            "rejected_rewards_mean": rejected_rewards_val.mean().item(),
+            "reward_accuracies": (chosen_rewards_val > rejected_rewards_val).float().mean().item(),
+            "reward_margins_mean": (chosen_rewards_val - rejected_rewards_val).mean().item(),
+        }
+
+        return loss, metrics
