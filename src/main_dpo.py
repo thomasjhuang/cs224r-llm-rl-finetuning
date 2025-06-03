@@ -2,6 +2,8 @@
 from __future__ import annotations
 import os, math, argparse, logging, time
 from functools import partial
+from datetime import datetime
+import pytz
 import wandb
 import torch
 from torch.utils.data import DataLoader
@@ -34,6 +36,11 @@ def get_device_and_dtype():
     
     return device, dtype, use_amp
 
+def get_formatted_timestamp():
+    pst = pytz.timezone('US/Pacific')
+    now = datetime.now(pst)
+    return now.strftime("%Y-%m-%d-%H%M-PST")
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_path", required=True, help="Path to SFT model")
@@ -58,6 +65,14 @@ def main():
     logger.info(f"Effective runtime arguments: {vars(args)}")
     os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
     wandb.init(project=args.wandb_project, config=vars(args))
+
+    # Create run-specific directory name
+    run_name = wandb.run.name
+    timestamp = get_formatted_timestamp()
+    run_dir = f"{run_name}_{timestamp}"
+    
+    logger.info(f"Training run: {run_name}")
+    logger.info(f"Models will be saved to: {args.output_dir}/{run_dir}")
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -180,10 +195,11 @@ def main():
                         running_metrics = {}
 
                     if global_step % args.save_every == 0:
-                        save_path = os.path.join(args.output_dir, f"step_{global_step}")
+                        save_path = os.path.join(args.output_dir, run_dir, f"step_{global_step}")
                         os.makedirs(save_path, exist_ok=True)
                         model.save_pretrained(save_path)
                         tok.save_pretrained(save_path)
+                        logger.info(f"Model saved to: {save_path}")
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
@@ -195,9 +211,11 @@ def main():
                     raise e
 
     logger.info("Training finished - saving final model")
-    os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(args.output_dir)
-    tok.save_pretrained(args.output_dir)
+    final_save_path = os.path.join(args.output_dir, run_dir, "final")
+    os.makedirs(final_save_path, exist_ok=True)
+    model.save_pretrained(final_save_path)
+    tok.save_pretrained(final_save_path)
+    logger.info(f"Final model saved to: {final_save_path}")
     wandb.finish()
 
 if __name__ == "__main__":
