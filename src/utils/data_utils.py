@@ -10,7 +10,7 @@ class DataCollatorForSFT:
     padding: Union[bool, str] = True
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
-    label_pad_token_id: int = -100 # Standard ignore index for labels
+    label_pad_token_id: int = -100
     return_tensors: str = "pt"
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -77,52 +77,54 @@ class DataCollatorForSFT:
             
         return batch
 
-@dataclass
 class DataCollatorForDPO:
-    """Data collator for DPO training."""
-    tokenizer: PreTrainedTokenizerBase
-    max_length: int = 1024
+    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+        self.tokenizer = tokenizer
 
-    def __call__(self, instances: List[Dict]) -> Dict[str, torch.Tensor]:
-        """Collate function for DPO data."""
-        batch_size = len(instances)
-        
-        chosen_input_ids = []
-        chosen_attention_mask = []
-        chosen_labels = []
-        rejected_input_ids = []
-        rejected_attention_mask = []
-        rejected_labels = []
-        
-        for inst in instances:
-            chosen_input_ids.append(inst["chosen_input_ids"])
-            chosen_attention_mask.append(inst["chosen_attention_mask"])
-            chosen_labels.append(inst["chosen_labels"])
-            rejected_input_ids.append(inst["rejected_input_ids"])
-            rejected_attention_mask.append(inst["rejected_attention_mask"])
-            rejected_labels.append(inst["rejected_labels"])
-        
-        def pad_tensors(tensor_list, pad_value=0):
-            max_len = max(len(t) for t in tensor_list)
-            max_len = min(max_len, self.max_length)
-            
-            padded = []
-            for tensor in tensor_list:
-                if len(tensor) > max_len:
-                    padded.append(tensor[:max_len])
-                else:
-                    padding = [pad_value] * (max_len - len(tensor))
-                    padded.append(torch.cat([tensor, torch.tensor(padding, dtype=tensor.dtype)]))
-            return torch.stack(padded)
-        
-        return {
-            "chosen_input_ids": pad_tensors(chosen_input_ids, self.tokenizer.pad_token_id),
-            "chosen_attention_mask": pad_tensors(chosen_attention_mask, 0),
-            "chosen_labels": pad_tensors(chosen_labels, -100),
-            "rejected_input_ids": pad_tensors(rejected_input_ids, self.tokenizer.pad_token_id),
-            "rejected_attention_mask": pad_tensors(rejected_attention_mask, 0),
-            "rejected_labels": pad_tensors(rejected_labels, -100),
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        batch = {}
+
+        # Define the keys for different types of sequences
+        # Assuming labels also need similar padding with a specific pad_value
+        sequence_keys = {
+            "chosen_input_ids": self.tokenizer.pad_token_id,
+            "chosen_attention_mask": 0,
+            "chosen_labels": -100,
+            "rejected_input_ids": self.tokenizer.pad_token_id,
+            "rejected_attention_mask": 0,
+            "rejected_labels": -100,
         }
+
+        for key, pad_value in sequence_keys.items():
+            if key in features[0] and isinstance(features[0][key], torch.Tensor):
+                sequences = [f[key] for f in features]
+                batch[key] = self._pad_sequences(sequences, pad_value=pad_value)
+            elif key in features[0]: # Non-tensor, just collect if not handled above (should not happen for these keys)
+                 batch[key] = [f[key] for f in features]
+
+
+        # Include prompts if they exist (as a list of strings)
+        if "prompt" in features[0] and isinstance(features[0]["prompt"], str):
+            batch["prompt"] = [f["prompt"] for f in features]
+            
+        return batch
+
+    def _pad_sequences(self, sequences: List[torch.Tensor], pad_value: int) -> torch.Tensor:
+        # sequences is a list of 1D tensors
+        if not sequences:
+            return torch.empty(0)
+            
+        max_len = max(seq.size(0) for seq in sequences)
+        padded_sequences = []
+        for seq in sequences:
+            pad_len = max_len - seq.size(0)
+            if pad_len > 0:
+                padding_tensor = torch.full((pad_len,), pad_value, dtype=seq.dtype, device=seq.device)
+                padded_seq = torch.cat([seq, padding_tensor], dim=0)
+            else:
+                padded_seq = seq
+            padded_sequences.append(padded_seq)
+        return torch.stack(padded_sequences)
 
 def apply_chat_template(
     tokenizer: PreTrainedTokenizerBase,

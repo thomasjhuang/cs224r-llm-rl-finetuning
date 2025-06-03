@@ -1,5 +1,7 @@
-#!/usr/bin/env python
 from __future__ import annotations
+#!/usr/bin/env python
+import torch
+torch.backends.cuda.matmul.allow_tf32 = True
 import os, math, argparse, logging, time
 from functools import partial
 from datetime import datetime
@@ -52,6 +54,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=5e-6)
     p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--max_length", type=int, default=512)
+    p.add_argument("--max_prompt_length", type=int, default=256, help="Maximum length for prompts during tokenization. Completions will be truncated to fit max_length - max_prompt_length.")
     p.add_argument("--beta", type=float, default=0.1)
     p.add_argument("--eval_every", type=int, default=500)
     p.add_argument("--log_every", type=int, default=50)
@@ -97,17 +100,18 @@ def main():
     for param in ref_model.parameters():
         param.requires_grad = False
 
-    dpo_method = DPOMethod(policy=model, reference_model=ref_model, beta=args.beta, device=device)
+    dpo_method = DPOMethod(policy=model, reference_model=ref_model, beta=args.beta, device=device, pad_token_id=tok.pad_token_id)
 
     train_dataset = DPODataset(
         dataset_name=args.dataset_name,
         tokenizer=tok,
         split="train_prefs",
         max_length=args.max_length,
+        max_prompt_length=args.max_prompt_length,
         subset=args.subset
     )
 
-    collator = DataCollatorForDPO(tokenizer=tok, max_length=args.max_length)
+    collator = DataCollatorForDPO(tokenizer=tok)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.per_device_train_batch_size,
