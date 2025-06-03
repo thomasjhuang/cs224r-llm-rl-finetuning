@@ -12,11 +12,13 @@ class DPOMethod:
         policy: PreTrainedModel,
         reference_model: PreTrainedModel,
         beta: float = 0.1,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        pad_token_id: Optional[int] = None,
     ):
         self.policy = policy
         self.reference_model = reference_model
         self.beta = beta
+        self.pad_token_id = pad_token_id
         
         if device is not None:
             self.device = device
@@ -34,27 +36,46 @@ class DPOMethod:
         self.reference_model.eval()
 
     def _get_batch_logps(self, model_instance: PreTrainedModel, input_ids: torch.Tensor, attention_mask: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        if self.use_cuda_amp:
-            with torch.amp.autocast('cuda'):
-                outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask)
-                model_logits = outputs.logits
+        """Shift labels and logits, then compute log probabilities of labels under model logits."""
+        labels = labels.to(input_ids.device)
+
+        if hasattr(self, 'use_cuda_amp') and self.use_cuda_amp and input_ids.is_cuda: # Check if use_cuda_amp exists and is True, and inputs are on CUDA
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+                outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+                model_logits_raw = outputs.logits.to(torch.float32) # Cast to float32 for stability if mixed precision is used for forward pass
         else:
-            outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask)
-            model_logits = outputs.logits
-            
-        assert model_logits.shape[:-1] == labels.shape
+            outputs = model_instance(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            model_logits_raw = outputs.logits
         
-        labels = labels[:, 1:].clone()
-        model_logits = model_logits[:, :-1, :]
-        loss_mask = (labels != -100)
+        # Shift logits and labels for autoregressive loss calculation
+        # model_logits_raw: (batch_size, seq_len, vocab_size)
+        # labels: (batch_size, seq_len)
+        shifted_logits = model_logits_raw[..., :-1, :].contiguous()
+        shifted_labels = labels[..., 1:].contiguous()
+
+        # Calculate log probabilities using log_softmax and gather, similar to original DPO implementations
+        # log_softmax_logits shape: (batch_size, seq_len - 1, vocab_size)
+        log_softmax_logits = F.log_softmax(shifted_logits, dim=-1)
         
-        labels[labels == -100] = 0
+        # Create a mask for valid, non-padded label positions
+        # loss_mask shape: (batch_size, seq_len - 1)
+        loss_mask = (shifted_labels != -100)
         
-        per_token_log_probs = torch.gather(model_logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-        per_token_log_probs = per_token_log_probs * loss_mask
-        sequence_log_probs = per_token_log_probs.sum(dim=1)
+        # Prepare labels for gather: set ignored indices to 0 (won't affect sum due to loss_mask)
+        # and ensure it's LongTensor for gather.
+        # temp_shifted_labels shape: (batch_size, seq_len - 1)
+        temp_shifted_labels = shifted_labels.clone().long() # Ensure long type
+        temp_shifted_labels[~loss_mask] = 0 
+
+        # Gather the log probabilities of the true tokens
+        # true_token_logps shape: (batch_size, seq_len - 1)
+        true_token_logps = torch.gather(log_softmax_logits, dim=2, index=temp_shifted_labels.unsqueeze(2)).squeeze(2)
         
-        return sequence_log_probs
+        # Sum log probabilities for non-masked tokens
+        # sum_logps shape: (batch_size,)
+        sum_logps = (true_token_logps * loss_mask).sum(dim=-1)
+        
+        return sum_logps
 
     def compute_loss(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         chosen_input_ids = batch["chosen_input_ids"].to(self.device)
@@ -64,12 +85,51 @@ class DPOMethod:
         rejected_attention_mask = batch["rejected_attention_mask"].to(self.device)
         rejected_labels = batch["rejected_labels"].to(self.device)
 
-        policy_chosen_logps = self._get_batch_logps(self.policy, chosen_input_ids, chosen_attention_mask, chosen_labels)
-        policy_rejected_logps = self._get_batch_logps(self.policy, rejected_input_ids, rejected_attention_mask, rejected_labels)
+        # Determine batch size to assist in splitting later
+        batch_size = chosen_input_ids.size(0)
+
+        # Ensure chosen and rejected sequences are padded to the same length before concatenation
+        current_max_len = max(chosen_input_ids.shape[1], rejected_input_ids.shape[1])
+
+        def _pad_tensor(tensor: torch.Tensor, target_len: int, pad_value: int, dim: int = 1) -> torch.Tensor:
+            if tensor.shape[dim] >= target_len:
+                return tensor
+            pad_shape = list(tensor.shape)
+            pad_shape[dim] = target_len - tensor.shape[dim]
+            padding_tensor = torch.full(pad_shape, pad_value, dtype=tensor.dtype, device=tensor.device)
+            return torch.cat([tensor, padding_tensor], dim=dim)
+
+        if self.pad_token_id is None:
+            raise ValueError("pad_token_id must be set in DPOMethod for dynamic padding.")
+
+        chosen_input_ids = _pad_tensor(chosen_input_ids, current_max_len, self.pad_token_id)
+        chosen_attention_mask = _pad_tensor(chosen_attention_mask, current_max_len, 0) # Pad attention mask with 0
+        chosen_labels = _pad_tensor(chosen_labels, current_max_len, -100) # Pad labels with -100
+
+        rejected_input_ids = _pad_tensor(rejected_input_ids, current_max_len, self.pad_token_id)
+        rejected_attention_mask = _pad_tensor(rejected_attention_mask, current_max_len, 0)
+        rejected_labels = _pad_tensor(rejected_labels, current_max_len, -100)
+
+        # Concatenate chosen and rejected inputs for a single policy pass
+        policy_input_ids = torch.cat([chosen_input_ids, rejected_input_ids], dim=0)
+        policy_attention_mask = torch.cat([chosen_attention_mask, rejected_attention_mask], dim=0)
+        policy_labels = torch.cat([chosen_labels, rejected_labels], dim=0)
+        
+        all_policy_logps = self._get_batch_logps(self.policy, policy_input_ids, policy_attention_mask, policy_labels)
+        policy_chosen_logps = all_policy_logps[:batch_size]
+        policy_rejected_logps = all_policy_logps[batch_size:]
 
         with torch.no_grad():
-            reference_chosen_logps = self._get_batch_logps(self.reference_model, chosen_input_ids, chosen_attention_mask, chosen_labels)
-            reference_rejected_logps = self._get_batch_logps(self.reference_model, rejected_input_ids, rejected_attention_mask, rejected_labels)
+            # Concatenate chosen and rejected inputs for a single reference model pass
+            # We can reuse the same concatenated tensors if they haven't been modified,
+            # or re-concatenate if there's any doubt or for clarity.
+            reference_input_ids = torch.cat([chosen_input_ids, rejected_input_ids], dim=0)
+            reference_attention_mask = torch.cat([chosen_attention_mask, rejected_attention_mask], dim=0)
+            reference_labels = torch.cat([chosen_labels, rejected_labels], dim=0)
+
+            all_reference_logps = self._get_batch_logps(self.reference_model, reference_input_ids, reference_attention_mask, reference_labels)
+            reference_chosen_logps = all_reference_logps[:batch_size]
+            reference_rejected_logps = all_reference_logps[batch_size:]
 
         pi_logratios = policy_chosen_logps - policy_rejected_logps
         ref_logratios = reference_chosen_logps - reference_rejected_logps
@@ -92,7 +152,7 @@ class DPOMethod:
             rejected_rewards_val = self.beta * policy_rejected_logps_minus_ref
             
         metrics = {
-            "logits_std": logits.std().item(),
+            "logits_std": logits.std().item() if logits.numel() > 1 and not torch.isnan(logits.std()) else 0.0,
             "policy_chosen_logp": policy_chosen_logps_mean.item(),
             "policy_rejected_logp": policy_rejected_logps_mean.item(),
             "ref_chosen_logp": reference_chosen_logps_mean.item(),
@@ -101,6 +161,8 @@ class DPOMethod:
             "rejected_rewards_mean": rejected_rewards_val.mean().item(),
             "reward_accuracies": (chosen_rewards_val > rejected_rewards_val).float().mean().item(),
             "reward_margins_mean": (chosen_rewards_val - rejected_rewards_val).mean().item(),
+            "pi_logratios_mean": pi_logratios.mean().item(),
+            "ref_logratios_mean": ref_logratios.mean().item(),
         }
 
         return loss, metrics
