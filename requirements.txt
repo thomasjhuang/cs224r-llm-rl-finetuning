@@ -12,3 +12,4 @@ pytest
 wandb>=0.16.0
 huggingface_hub[cli]>=0.20.0
 vllm>=0.3.0
+pytz>=2023.3
