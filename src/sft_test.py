@@ -9,7 +9,7 @@ from multiprocessing import cpu_count
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 MODEL_NAME        = "Qwen/Qwen2.5-0.5B"
 SEQ_LEN           = 1024
-BATCH_SIZE        = 64
+BATCH_SIZE        = 16
 NUM_WARMUP_STEPS  = 10
 NUM_MEASURE_STEPS = 50
 DEVICE            = "cuda"
@@ -195,6 +195,8 @@ start_time = time.time()
 step = 0
 global_step = 0
 for batch in train_loader:
+    # Move batch to GPU on the main process
+    batch = {k: v.to(DEVICE, non_blocking=True) for k, v in batch.items()}
     if step >= NUM_MEASURE_STEPS:
         break
 
