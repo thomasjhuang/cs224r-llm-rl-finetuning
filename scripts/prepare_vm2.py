@@ -48,7 +48,7 @@ def prepare_vm(ssh_user, ssh_ip, ssh_port):
   print("Setting up SSH keys...")
   ssh_key_path = os.path.expanduser("~/code/setup/vast/ssh/id_rsa_git")
   ssh_pub_key_path = os.path.expanduser("~/code/setup/vast/ssh/id_rsa_git.pub")
-  run_command(f"ssh -p {ssh_port} {ssh_user}@{ssh_ip} 'sudo chmod 777 /workspace/ && sudo apt-get install curl'")
+  run_command(f"ssh -p {ssh_port} {ssh_user}@{ssh_ip} 'sudo chmod 777 /workspace/ && sudo apt-get install curl && sudo apt-get install tmux'")
   run_command(f"ssh -p {ssh_port} {ssh_user}@{ssh_ip} 'mkdir -p {HOME}/.ssh && chmod 700 {HOME}/.ssh'")
   run_command(f"scp -P {ssh_port} {ssh_key_path} {ssh_user}@{ssh_ip}:{HOME}/.ssh/id_rsa_git")
   run_command(f"scp -P {ssh_port} {ssh_pub_key_path} {ssh_user}@{ssh_ip}:{HOME}/.ssh/id_rsa_git.pub")
@@ -93,9 +93,9 @@ if [ ! -f "{HOME}/miniconda.sh" ]; then
 fi
 
 # Clone CS224r repository
-mkdir -p /workspace
-cd /workspace
-if [ ! -d "/workspace/cs224r" ]; then
+mkdir -p {HOME}/workspace
+cd {HOME}/workspace
+if [ ! -d "{HOME}/workspace/cs224r" ]; then
   git clone git@github.com:thomasjhuang/cs224r-llm-rl-finetuning.git cs224r
 fi
 
@@ -120,7 +120,7 @@ if ! grep -q "export HF_TOKEN" {HOME}/.bashrc; then
 fi
 
 echo "create conda environment"
-cd /workspace/cs224r
+cd /{HOME}/workspace/cs224r
 bash setupenv.sh
 """
 
@@ -150,7 +150,7 @@ bash setupenv.sh
 
 if __name__ == "__main__":
   if len(sys.argv) != 4:
-    print("Usage: python prepare_vm.py <ssh_ip> <ssh_port>")
+    print("Usage: python prepare_vm.py <ssh_user> <ssh_ip> <ssh_port>")
     sys.exit(1)
 	
   ssh_user = sys.argv[1]
