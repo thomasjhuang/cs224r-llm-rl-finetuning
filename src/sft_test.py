@@ -103,8 +103,8 @@ def collate_fn(batch):
         max_length=SEQ_LEN,
         return_offsets_mapping=True
     )
-    input_ids       = encodings["input_ids"].to(DEVICE)       # (B, SEQ_LEN)
-    attention_mask  = encodings["attention_mask"].to(DEVICE)  # (B, SEQ_LEN)
+    input_ids       = encodings["input_ids"]       # (B, SEQ_LEN)
+    attention_mask  = encodings["attention_mask"]  # (B, SEQ_LEN)
     offsets         = encodings["offset_mapping"]             # (B, SEQ_LEN, 2), char‐span for each token
 
     batch_size, seq_len = input_ids.shape
@@ -175,6 +175,8 @@ print(
 )
 warmup_iter = 0
 for batch in train_loader:
+    # Move batch to GPU on the main process
+    batch = {k: v.to(DEVICE, non_blocking=True) for k, v in batch.items()}
     outputs = model(**batch)
     loss = outputs.loss
     loss.backward()
