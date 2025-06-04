@@ -80,7 +80,7 @@ def main():
         collate_fn=lambda b: collate_fn_pytorch(b, tok.pad_token_id),
     )
 
-    from torch.cuda.amp import autocast, GradScaler
+    from torch.amp import autocast, GradScaler
     scaler = GradScaler()
 
     run_loss, gstep, acc_steps = 0.0, 0, 0
@@ -90,7 +90,7 @@ def main():
         for batch_idx, batch in enumerate(loader):
             # Move batch to GPU on the main process
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            with autocast(device_type="cuda", dtype=torch.float16):
+            with autocast("cuda", dtype=torch.float16):
                 out = model(**batch)
                 loss = out.loss / args.gradient_accumulation_steps
 
