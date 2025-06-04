@@ -68,7 +68,7 @@ def get_nemotron_score(client, prompt, response):
                 # Check if logprobs.content is a list and not empty
                 if isinstance(completion.choices[0].logprobs.content, list) and completion.choices[0].logprobs.content:
                     if hasattr(completion.choices[0].logprobs.content[0], 'logprob'):
-                return float(completion.choices[0].logprobs.content[0].logprob)
+                        return float(completion.choices[0].logprobs.content[0].logprob)
         
         # Fallback: parse score from message content
         content = completion.choices[0].message.content
@@ -369,8 +369,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True, choices=["collect_dpo", "collect_ref", "compare"], 
                        help="Evaluation mode: collect_dpo, collect_ref, or compare")
-    parser.add_argument("--model_path_to_evaluate", required=True, help="Path to the primary model to evaluate (e.g., your DPO model)")
-    parser.add_argument("--model_type", default="DPO", choices=["SFT", "DPO"], help="Type of the primary model being evaluated")
+    parser.add_argument("--model_path_to_evaluate", help="Path to the primary model to evaluate (e.g., your DPO model)", default=None)
+    parser.add_argument("--model_type", default="DPO", help="Type of the primary model being evaluated")
     parser.add_argument("--reference_model_name_or_path", default="Qwen/Qwen2.5-0.5B-Instruct", help="Name or path of the Qwen reference model")
     parser.add_argument("--reference_model_nickname", default="QwenRef", help="Short nickname for the reference model")
     parser.add_argument("--num_samples", type=int, default=25, help="Number of samples to evaluate")

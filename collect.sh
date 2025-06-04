@@ -60,6 +60,7 @@ python evaluation/evaluate_nemotron.py \
     --num_samples $NUM_SAMPLES \
     --vllm_port $PORT \
     --model_type "$MODEL_TYPE"
+    --mode collect_dpo
 
 echo "==============================================="
 echo "✅ Evaluation complete!" 

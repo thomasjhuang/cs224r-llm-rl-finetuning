@@ -1,0 +1,53 @@
+#1) sft_anatal vs qwen_instruct
+#  ./start_vllm.sh anatal/qwen2_05_smol-smoltalk
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --vllm_port 8002 --model_type sft_anatal --mode collect_dpo
+
+# ./start_vllm.sh Qwen/Qwen2.5-0.5B-Instruct
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --reference_vllm_port 8002 --model_type sft_anatal --reference_model_nickname qwen_instruct --mode collect_ref
+
+python ../evaluation/evaluate_nemotron.py --mode compare --model_type sft_anatal --reference_model_nickname qwen_instruct
+
+
+#2) dpo vs qwen_instruct
+# ./start_vllm.sh ./qwen2_dpo/run_20250603_055354/iconic-breeze-24_2025-06-02-2254-PST/final/
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --vllm_port 8002 --model_type dpo --mode collect_dpo
+
+# ./start_vllm.sh Qwen/Qwen2.5-0.5B
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --reference_vllm_port 8002 --model_type dpo --reference_model_nickname qwen_base --mode collect_ref
+
+# ./start_vllm.sh Qwen/Qwen2.5-0.5B-Instruct
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --reference_vllm_port 8002 --model_type dpo --reference_model_nickname qwen_instruct --mode collect_ref
+
+#./start_vllm.sh anatal/qwen2_05_smol-smoltalk
+python ../evaluation/evaluate_nemotron.py --num_samples 100 --reference_vllm_port 8002 --model_type dpo --reference_model_nickname sft_anatal --mode collect_ref
+
+python ../evaluation/evaluate_nemotron.py --mode compare --model_type dpo --reference_model_nickname qwen_instruct
+
+
+============================================================
+FINAL EVALUATION RESULTS: dpo vs qwen_instruct
+============================================================
+Evaluated Model (dpo): None
+Reference Model (qwen_instruct): Qwen/Qwen2.5-0.5B-Instruct
+Total prompts compared: 100
+dpo Wins: 24
+qwen_instruct Wins: 76
+dpo Win-rate vs qwen_instruct: 24.0%
+Status:
+============================================================
+💾 Final results saved to: dpo_vs_qwen_instruct_final_results.json
+
+============================================================
+FINAL EVALUATION RESULTS: sft_anatal vs qwen_instruct
+============================================================
+Evaluated Model (sft_anatal): None
+Reference Model (qwen_instruct): Qwen/Qwen2.5-0.5B-Instruct
+Total prompts compared: 100
+sft_anatal Wins: 24
+qwen_instruct Wins: 76
+sft_anatal Win-rate vs qwen_instruct: 24.0%
+Status:
+============================================================
+
+
+
