@@ -230,6 +230,8 @@ model.eval()
 eval_losses = []
 with torch.no_grad():
     for batch in eval_loader:
+        # Move batch to GPU on the main process
+        batch = {k: v.to(DEVICE, non_blocking=True) for k, v in batch.items()}
         outputs = model(**batch)
         eval_losses.append(outputs.loss.item())
 
