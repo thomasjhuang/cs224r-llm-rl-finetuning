@@ -1,6 +1,6 @@
 import os, time, math, argparse, logging
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 
@@ -77,7 +77,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
         prefetch_factor=2,
-        collate_fn=lambda b: collate_fn_pytorch(b, tok.pad_token_id, device),
+        collate_fn=lambda b: collate_fn_pytorch(b, tok.pad_token_id),
     )
 
     from torch.cuda.amp import autocast, GradScaler
@@ -88,6 +88,8 @@ def main():
 
     for epoch in range(args.epochs):
         for batch_idx, batch in enumerate(loader):
+            # Move batch to GPU on the main process
+            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with autocast(device_type="cuda", dtype=torch.float16):
                 out = model(**batch)
                 loss = out.loss / args.gradient_accumulation_steps
