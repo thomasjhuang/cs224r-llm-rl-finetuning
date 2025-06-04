@@ -84,6 +84,7 @@ def main():
         args.model_name,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         trust_remote_code=True,
+        attn_implementation="flash_attention_2"
     ).to(device).train()
 
     raw = load_dataset(args.dataset_name, split="train", streaming=args.streaming)

@@ -45,6 +45,7 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
     trust_remote_code=True
 ).to(DEVICE)
+model.gradient_checkpointing_enable()
 model.train()
 
 # ─── LOAD & INSPECT SMOL-SMOLTALK ──────────────────────────────────────────────
