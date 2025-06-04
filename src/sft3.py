@@ -25,7 +25,7 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=8)
     return p.parse_args()
 
-def collate_fn_pytorch(batch, pad_id, device):
+def collate_fn_pytorch(batch, pad_id):
     from torch.nn.utils.rnn import pad_sequence
     ids = [ex["input_ids"] for ex in batch]
     lbl = [ex["labels"]    for ex in batch]
@@ -33,9 +33,9 @@ def collate_fn_pytorch(batch, pad_id, device):
     lbl_padded = pad_sequence(lbl, batch_first=True, padding_value=-100)
     attn_mask = (ids_padded != pad_id).long()
     return {
-        "input_ids": ids_padded.to(device, non_blocking=True),
-        "labels":    lbl_padded.to(device, non_blocking=True),
-        "attention_mask": attn_mask.to(device, non_blocking=True),
+        "input_ids": ids_padded,
+        "labels":    lbl_padded,
+        "attention_mask": attn_mask,
     }
 
 def main():
