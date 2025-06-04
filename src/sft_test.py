@@ -64,58 +64,78 @@ eval_ds  = split_ds["test"]
 # ─── COLLATE FUNCTION ──────────────────────────────────────────────────────────
 def collate_fn(batch):
     """
-    Tries, in order:
-      1) ex["text"]
-      2) ex["prompt"] + ex["completion"]
-      3) ex["instruction"] + ex["response"]
-    and then tokenizes that concatenated string.
-
-    Finally:
-      - Pads/truncates to SEQ_LEN,
-      - Builds labels = input_ids but masks out pad positions (label = -100 on pad).
+    - Concatenate all messages’ content (in order).
+    - Track, at the token level, which spans came from 'user' vs 'assistant'.
+    - After tokenizing, set label = -100 for any token that belongs to the user portion.
+    - Also set label = -100 for all padding tokens (attention_mask==0).
     """
-    texts = []
+    texts          = []
+    user_token_spans = []  # list of (start_idx, end_idx) for user‐tokens in each example
+
     for ex in batch:
-        # 1) If your dataset has a single "text" field:
-        if "text" in ex:
-            txt = ex["text"]
+        # 1) Build one long string and remember character‐level split points for user vs assistant
+        parts            = []
+        cumulative_chars = 0       # track length in characters
+        spans            = []      # will hold (char_start, char_end) for every user‐message
 
-        # 2) If your dataset has separate "prompt" & "completion" fields:
-        elif "prompt" in ex and "completion" in ex:
-            txt = ex["prompt"] + ex["completion"]
+        for msg in ex["messages"]:
+            content = msg.get("content", msg.get("text", ""))
+            length  = len(content)
 
-        # 3) If your dataset uses "instruction" & "response":
-        elif "instruction" in ex and "response" in ex:
-            # Some users prefer formatting like:
-            #    "### Instruction:\n{instruction}\n### Response:\n{response}"
-            #
-            # But here we just concatenate directly.
-            txt = ex["instruction"] + ex["response"]
+            if msg["role"] == "user":
+                # Record that [cumulative_chars : cumulative_chars+length] came from user
+                spans.append((cumulative_chars, cumulative_chars + length))
 
-        else:
-            # No known key was found → raise immediately so you can fix the key names.
-            raise KeyError(
-                "None of ['text', ('prompt' & 'completion'), ('instruction' & 'response')] "
-                f"were present in this example. Keys available: {list(ex.keys())}"
-            )
+            parts.append(content)
+            cumulative_chars += length + 1  # +1 for the space/joint we’ll insert
 
-        texts.append(txt)
+        # Join them with spaces:
+        joined_text = " ".join(parts)
+        texts.append(joined_text)
+        user_token_spans.append(spans)
 
-    # Tokenize all of them in one go
+    # 2) Tokenize the entire batch at once (pad/truncate to SEQ_LEN)
     encodings = tokenizer(
         texts,
         return_tensors="pt",
         padding="max_length",
         truncation=True,
-        max_length=SEQ_LEN
+        max_length=SEQ_LEN,
+        return_offsets_mapping=True
     )
+    input_ids       = encodings["input_ids"].to(DEVICE)       # (B, SEQ_LEN)
+    attention_mask  = encodings["attention_mask"].to(DEVICE)  # (B, SEQ_LEN)
+    offsets         = encodings["offset_mapping"]             # (B, SEQ_LEN, 2), char‐span for each token
 
-    input_ids      = encodings["input_ids"].to(DEVICE)       # (B, SEQ_LEN)
-    attention_mask = encodings["attention_mask"].to(DEVICE)  # (B, SEQ_LEN)
-
-    # For causal‐LM: labels = input_ids but mask out pads
+    batch_size, seq_len = input_ids.shape
     labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
+
+    # 3) For each example, walk through token‐by‐token. If a token’s offset lies in any user‐span, mask it.
+    for i in range(batch_size):
+        spans_i = user_token_spans[i]  # list of (char_start, char_end) for user parts
+        for t in range(seq_len):
+            # If this token is padding, we’ll mask anyway:
+            if attention_mask[i, t] == 0:
+                labels[i, t] = -100
+                continue
+
+            # See this token’s character range in the original string:
+            char_start, char_end = offsets[i, t].tolist()
+
+            # If (char_start, char_end) overlaps ANY user span, label = -100
+            is_user_token = False
+            for (u_start, u_end) in spans_i:
+                # overlap check:
+                if not (char_end <= u_start or char_start >= u_end):
+                    is_user_token = True
+                    break
+
+            if is_user_token:
+                labels[i, t] = -100
+            # else: leave labels[i, t] as input_ids[i,t] → model will be trained to predict that token
+
+        # Finally, ensure all padding is masked (just in case):
+        labels[i][attention_mask[i] == 0] = -100
 
     return {
         "input_ids":      input_ids,
