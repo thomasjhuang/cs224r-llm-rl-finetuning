@@ -159,3 +159,6 @@ Thumbs.db
 
 # IDE specific files
 .idea/
+
+./rloo*
+/rloo

@@ -145,3 +145,13 @@ cs224r-llm-rl-finetuning/
 ├── kill_vllm.sh           # VLLM cleanup script
 └── README.md
 ```
+
+## Comparison
+
+```
+./start_vllm.sh ./qwen2_dpo/run_20250603_065621/brisk-lion-32_2025-06-02-2356-PST/final
+./run_evaluation.sh collect_dpo
+./start_vllm.sh Qwen/Qwen2.5-0.5B-Instruct 8003
+./run_evaluation.sh collect_ref 25 8003
+./run_evaluation.sh compare 25 8003
+```

@@ -68,7 +68,7 @@ def get_nemotron_score(client, prompt, response):
                 # Check if logprobs.content is a list and not empty
                 if isinstance(completion.choices[0].logprobs.content, list) and completion.choices[0].logprobs.content:
                     if hasattr(completion.choices[0].logprobs.content[0], 'logprob'):
-                return float(completion.choices[0].logprobs.content[0].logprob)
+                        return float(completion.choices[0].logprobs.content[0].logprob)
         
         # Fallback: parse score from message content
         content = completion.choices[0].message.content
@@ -87,6 +87,31 @@ def get_nemotron_score(client, prompt, response):
     except Exception as e:
         print(f"Error scoring with Nemotron: {e}")
         return None
+
+def auto_detect_vllm_model(port=8002):
+    """Auto-detect model information from running VLLM server"""
+    try:
+        if not test_vllm_connection(port):
+            return None, None
+        
+        vllm_client = setup_vllm_client(port)
+        models_list = vllm_client.models.list()
+        
+        if models_list.data:
+            model_name = models_list.data[0].id
+            # Try to infer model type from model name/path
+            model_type = "DPO"  # Default assumption
+            if "sft" in model_name.lower() or "instruct" in model_name.lower():
+                if "dpo" not in model_name.lower():
+                    model_type = "SFT"
+            
+            return model_name, model_type
+        else:
+            return None, None
+            
+    except Exception as e:
+        print(f"Error auto-detecting VLLM model: {e}")
+        return None, None
 
 def get_vllm_response(client, prompt_text, max_tokens=512, temperature=0.7, model_name=None):
     """Get response from VLLM server"""
@@ -369,14 +394,36 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True, choices=["collect_dpo", "collect_ref", "compare"], 
                        help="Evaluation mode: collect_dpo, collect_ref, or compare")
-    parser.add_argument("--model_path_to_evaluate", required=True, help="Path to the primary model to evaluate (e.g., your DPO model)")
-    parser.add_argument("--model_type", default="DPO", choices=["SFT", "DPO"], help="Type of the primary model being evaluated")
+    parser.add_argument("--model_path_to_evaluate", required=False, help="Path to the primary model to evaluate (auto-detected if not provided)")
+    parser.add_argument("--model_type", default=None, choices=["SFT", "DPO"], help="Type of the primary model being evaluated (auto-detected if not provided)")
     parser.add_argument("--reference_model_name_or_path", default="Qwen/Qwen2.5-0.5B-Instruct", help="Name or path of the Qwen reference model")
     parser.add_argument("--reference_model_nickname", default="QwenRef", help="Short nickname for the reference model")
     parser.add_argument("--num_samples", type=int, default=25, help="Number of samples to evaluate")
     parser.add_argument("--vllm_port", type=int, default=8002, help="VLLM server port for the model to evaluate")
     parser.add_argument("--reference_vllm_port", type=int, default=8003, help="VLLM server port for the reference model")
     args = parser.parse_args()
+
+    # Auto-detect model if not provided
+    if not args.model_path_to_evaluate or not args.model_type:
+        print(f"🔍 Auto-detecting model from VLLM server on port {args.vllm_port}...")
+        detected_model, detected_type = auto_detect_vllm_model(args.vllm_port)
+        
+        if detected_model:
+            if not args.model_path_to_evaluate:
+                args.model_path_to_evaluate = detected_model
+                print(f"✅ Auto-detected model: {detected_model}")
+            
+            if not args.model_type:
+                args.model_type = detected_type
+                print(f"✅ Auto-detected model type: {detected_type}")
+        else:
+            if not args.model_path_to_evaluate:
+                print(f"❌ Could not auto-detect model from VLLM server on port {args.vllm_port}")
+                print("Please provide --model_path_to_evaluate or ensure VLLM is running")
+                exit(1)
+            if not args.model_type:
+                args.model_type = "DPO"  # Default fallback
+                print(f"⚠️  Could not auto-detect model type, defaulting to: {args.model_type}")
 
     if args.mode == "collect_dpo":
         success = collect_dpo_responses(args)
