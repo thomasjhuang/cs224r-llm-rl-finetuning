@@ -85,32 +85,9 @@ class DPOMethod:
         rejected_attention_mask = batch["rejected_attention_mask"].to(self.device)
         rejected_labels = batch["rejected_labels"].to(self.device)
 
-        # Determine batch size to assist in splitting later
         batch_size = chosen_input_ids.size(0)
 
-        # Ensure chosen and rejected sequences are padded to the same length before concatenation
-        current_max_len = max(chosen_input_ids.shape[1], rejected_input_ids.shape[1])
-
-        def _pad_tensor(tensor: torch.Tensor, target_len: int, pad_value: int, dim: int = 1) -> torch.Tensor:
-            if tensor.shape[dim] >= target_len:
-                return tensor
-            pad_shape = list(tensor.shape)
-            pad_shape[dim] = target_len - tensor.shape[dim]
-            padding_tensor = torch.full(pad_shape, pad_value, dtype=tensor.dtype, device=tensor.device)
-            return torch.cat([tensor, padding_tensor], dim=dim)
-
-        if self.pad_token_id is None:
-            raise ValueError("pad_token_id must be set in DPOMethod for dynamic padding.")
-
-        chosen_input_ids = _pad_tensor(chosen_input_ids, current_max_len, self.pad_token_id)
-        chosen_attention_mask = _pad_tensor(chosen_attention_mask, current_max_len, 0) # Pad attention mask with 0
-        chosen_labels = _pad_tensor(chosen_labels, current_max_len, -100) # Pad labels with -100
-
-        rejected_input_ids = _pad_tensor(rejected_input_ids, current_max_len, self.pad_token_id)
-        rejected_attention_mask = _pad_tensor(rejected_attention_mask, current_max_len, 0)
-        rejected_labels = _pad_tensor(rejected_labels, current_max_len, -100)
-
-        # Concatenate chosen and rejected inputs for a single policy pass
+        # Sequences are now pre-padded to max_length, so we can directly concatenate
         policy_input_ids = torch.cat([chosen_input_ids, rejected_input_ids], dim=0)
         policy_attention_mask = torch.cat([chosen_attention_mask, rejected_attention_mask], dim=0)
         policy_labels = torch.cat([chosen_labels, rejected_labels], dim=0)
@@ -120,9 +97,6 @@ class DPOMethod:
         policy_rejected_logps = all_policy_logps[batch_size:]
 
         with torch.no_grad():
-            # Concatenate chosen and rejected inputs for a single reference model pass
-            # We can reuse the same concatenated tensors if they haven't been modified,
-            # or re-concatenate if there's any doubt or for clarity.
             reference_input_ids = torch.cat([chosen_input_ids, rejected_input_ids], dim=0)
             reference_attention_mask = torch.cat([chosen_attention_mask, rejected_attention_mask], dim=0)
             reference_labels = torch.cat([chosen_labels, rejected_labels], dim=0)
@@ -138,7 +112,6 @@ class DPOMethod:
 
         loss = -F.logsigmoid(self.beta * logits).mean()
 
-        # Add debugging metrics
         with torch.no_grad():
             policy_chosen_logps_minus_ref = policy_chosen_logps - reference_chosen_logps
             policy_rejected_logps_minus_ref = policy_rejected_logps - reference_rejected_logps
