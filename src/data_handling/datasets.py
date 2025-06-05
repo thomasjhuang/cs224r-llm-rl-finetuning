@@ -156,11 +156,11 @@ class DPODataset(Dataset):
         rejected_sequence_attention_mask_list = prompt_mask + rejected_mask
         
         # Create labels as lists and mask the prompt portion
-        chosen_labels_list = list(chosen_sequence_input_ids_list) # Copy list
+        chosen_labels_list = list(chosen_sequence_input_ids_list)
         for i in range(min(prompt_len_after_trunc, len(chosen_labels_list))):
             chosen_labels_list[i] = -100
 
-        rejected_labels_list = list(rejected_sequence_input_ids_list) # Copy list
+        rejected_labels_list = list(rejected_sequence_input_ids_list)
         for i in range(min(prompt_len_after_trunc, len(rejected_labels_list))):
             rejected_labels_list[i] = -100
 
@@ -174,6 +174,22 @@ class DPODataset(Dataset):
             rejected_sequence_input_ids_list = rejected_sequence_input_ids_list[:self.max_length]
             rejected_sequence_attention_mask_list = rejected_sequence_attention_mask_list[:self.max_length]
             rejected_labels_list = rejected_labels_list[:self.max_length]
+
+        # RIGHT PADDING: Pad both sequences to max_length for consistency
+        chosen_len = len(chosen_sequence_input_ids_list)
+        rejected_len = len(rejected_sequence_input_ids_list)
+        
+        if chosen_len < self.max_length:
+            pad_len = self.max_length - chosen_len
+            chosen_sequence_input_ids_list.extend([self.tokenizer.pad_token_id] * pad_len)
+            chosen_sequence_attention_mask_list.extend([0] * pad_len)
+            chosen_labels_list.extend([-100] * pad_len)
+            
+        if rejected_len < self.max_length:
+            pad_len = self.max_length - rejected_len
+            rejected_sequence_input_ids_list.extend([self.tokenizer.pad_token_id] * pad_len)
+            rejected_sequence_attention_mask_list.extend([0] * pad_len)
+            rejected_labels_list.extend([-100] * pad_len)
             
         return {
             "prompt": prompt_str, 
