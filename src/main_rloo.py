@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import torch
+import torch.nn as nn
 import wandb
 from datasets import load_dataset, Dataset
 from torch.utils.data import DataLoader
@@ -50,9 +51,15 @@ def parse_args():
     
     return parser.parse_args()
 
-def prepare_prompt_for_generation(sample, tokenizer):
+def prepare_prompt_for_generation(sample, tokenizer, use_cot=True):
     numbers_str = ", ".join(map(str, sample['nums']))
-    problem_text = f"Using the numbers [{numbers_str}], create an equation that equals {sample['target']}."
+    
+    if use_cot:
+        # Chain-of-Thought prompt for TTC
+        problem_text = f"Using the numbers [{numbers_str}], create an equation that equals {sample['target']}. Think step by step and show your reasoning."
+    else:
+        # Direct prompt (vanilla)
+        problem_text = f"Using the numbers [{numbers_str}], create an equation that equals {sample['target']}."
     
     messages = [{"role": "user", "content": problem_text}]
     prompt_chat_template = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -65,8 +72,15 @@ def main():
     wandb_run_name = args.wandb_run_name if args.wandb_run_name else f"rloo-k{args.k_samples}-lr{args.lr}-bs{args.batch_size}"
     wandb.init(project=args.wandb_project, name=wandb_run_name, config=vars(args))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        num_gpus = torch.cuda.device_count()
+        logger.info(f"Using device: {device}")
+        if num_gpus > 1:
+            logger.info(f"Using {num_gpus} GPUs for training.")
+    else:
+        device = torch.device("cpu")
+        logger.info("Using CPU.")
 
     tokenizer_path = args.tokenizer_path if args.tokenizer_path else args.sft_model_path
     logger.info(f"Loading tokenizer from: {tokenizer_path}")
@@ -75,8 +89,12 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     
     logger.info(f"Loading SFT model from: {args.sft_model_path}")
-    model = AutoModelForCausalLM.from_pretrained(args.sft_model_path, torch_dtype=torch.float32).to(device)
-    model.train()
+    model = AutoModelForCausalLM.from_pretrained(args.sft_model_path, torch_dtype=torch.float32)
+    model.to(device)
+
+    if torch.cuda.device_count() > 1:
+        logger.info(f"Applying torch.nn.DataParallel to the model for {torch.cuda.device_count()} GPUs.")
+        model = nn.DataParallel(model)
 
     logger.info(f"Loading prompt dataset: {args.prompt_dataset_name}, split: {args.prompt_dataset_split}")
     prompt_dataset = load_dataset(args.prompt_dataset_name, split=args.prompt_dataset_split)
@@ -90,7 +108,9 @@ def main():
         tokenized_prompts = tokenizer(prompt_texts, return_tensors='pt', padding=True, truncation=True, max_length=tokenizer.model_max_length // 2).to(device)
         return tokenized_prompts['input_ids'], tokenized_prompts['attention_mask'], prompt_texts, original_datas
 
-    processed_prompt_dataset = prompt_dataset.map(lambda x: prepare_prompt_for_generation(x, tokenizer), batched=False)
+    # Use Chain-of-Thought prompting when TTC is enabled
+    use_cot = args.ttc_internal_samples_n > 1 and args.ttc_lambda_cost > 0
+    processed_prompt_dataset = prompt_dataset.map(lambda x: prepare_prompt_for_generation(x, tokenizer, use_cot), batched=False)
     
     prompt_dataloader = DataLoader(processed_prompt_dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
 

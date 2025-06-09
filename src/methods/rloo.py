@@ -1,6 +1,7 @@
 # REINFORCE Leave-One-Out (RLOO) implementation
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -30,121 +31,116 @@ class RLOOTrainer:
 
     def _generate_samples(self, prompt_ids, prompt_mask, original_data):
         batch_size = prompt_ids.size(0)
-        all_texts = [] 
-        all_actions = []     
-        all_data = [] 
+        self.model.eval()
 
-        self.model.eval() 
-        with torch.no_grad():
-            for i in range(batch_size):
-                curr_prompt_ids_full = prompt_ids[i:i+1] 
-                curr_mask_full = prompt_mask[i:i+1]
-                curr_data_item = original_data[i]
-                
-                prompt_len = curr_prompt_ids_full.shape[1]
-                
-                rloo_sample_texts = []
-                rloo_sample_actions = []
-                rloo_sample_data_copies = []
+        # Determine number of generations per prompt
+        is_ttc = self.ttc_internal_samples_n > 1 and self.ttc_lambda_cost > 0
+        num_gens_per_prompt = self.k_samples * (self.ttc_internal_samples_n if is_ttc else 1)
 
-                for _ in range(self.k_samples): # Outer RLOO k_samples loop
-                    if self.ttc_internal_samples_n > 1 and self.ttc_lambda_cost > 0: # Perform internal sampling only if cost is applied
-                        best_internal_reward = -float('inf')
-                        best_internal_action_ids = None
-                        best_internal_text = "" # Default empty string
-
-                        for _ in range(self.ttc_internal_samples_n): # Inner TTC internal_samples_n loop
-                            internal_outputs = self.model.generate(
-                                curr_prompt_ids_full,
-                                attention_mask=curr_mask_full,
-                                max_new_tokens=self.max_length_generation,
-                                temperature=self.temperature,
-                                do_sample=True,
-                                pad_token_id=self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id,
-                                eos_token_id=self.tokenizer.eos_token_id,
-                                num_return_sequences=1,
-                            )
-                            internal_generated_ids = internal_outputs[:, prompt_len:] 
-                            # Handle case where nothing is generated (empty tensor)
-                            if internal_generated_ids.numel() == 0:
-                                internal_generated_text = ""
-                                current_internal_reward = calculate_countdown_reward(internal_generated_text, curr_data_item['nums'], curr_data_item['target'])[0]
-                            else:
-                                internal_generated_text = self.tokenizer.decode(internal_generated_ids[0], skip_special_tokens=True)
-                                current_internal_reward = calculate_countdown_reward(internal_generated_text, curr_data_item['nums'], curr_data_item['target'])[0]
-
-                            if current_internal_reward > best_internal_reward:
-                                best_internal_reward = current_internal_reward
-                                best_internal_action_ids = internal_generated_ids[0].to(self.device) if internal_generated_ids.numel() > 0 else torch.tensor([], dtype=torch.long, device=self.device)
-                                best_internal_text = internal_generated_text
-                        
-                        # After internal sampling, the best one becomes the sample for RLOO
-                        rloo_sample_texts.append(best_internal_text)
-                        rloo_sample_actions.append(best_internal_action_ids)
-                        rloo_sample_data_copies.append(curr_data_item)
-                    else:
-                        # Standard single generation for this RLOO k_sample
-                        outputs = self.model.generate(
-                            curr_prompt_ids_full,
-                            attention_mask=curr_mask_full,
-                            max_new_tokens=self.max_length_generation,
-                            temperature=self.temperature,
-                            do_sample=True,
-                            pad_token_id=self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id,
-                            eos_token_id=self.tokenizer.eos_token_id,
-                            num_return_sequences=1,
-                        )
-                        generated_ids = outputs[:, prompt_len:]
-                        if generated_ids.numel() == 0:
-                            generated_text = ""
-                            action_tensor = torch.tensor([], dtype=torch.long, device=self.device)
-                        else:
-                            generated_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                            action_tensor = generated_ids[0].to(self.device)
-                        
-                        rloo_sample_texts.append(generated_text)
-                        rloo_sample_actions.append(action_tensor)
-                        rloo_sample_data_copies.append(curr_data_item)
-
-                all_texts.append(rloo_sample_texts)
-                all_actions.append(rloo_sample_actions)
-                all_data.append(rloo_sample_data_copies)
+        # Repeat prompts and masks for batch generation
+        expanded_prompt_ids = prompt_ids.repeat_interleave(num_gens_per_prompt, dim=0)
+        expanded_prompt_mask = prompt_mask.repeat_interleave(num_gens_per_prompt, dim=0)
         
-        self.model.train() 
+        prompt_len = prompt_ids.shape[1]
+
+        with torch.no_grad():
+            # Use the underlying model's generate function if using DataParallel
+            model_to_generate = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+            generated_outputs = model_to_generate.generate(
+                input_ids=expanded_prompt_ids,
+                attention_mask=expanded_prompt_mask,
+                max_new_tokens=self.max_length_generation,
+                temperature=self.temperature,
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        generated_ids = generated_outputs[:, prompt_len:]
+        generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+        all_texts, all_actions, all_data = [], [], []
+        gen_idx = 0
+        for i in range(batch_size):
+            curr_data_item = original_data[i]
+            rloo_sample_texts, rloo_sample_actions, rloo_sample_data_copies = [], [], []
+
+            for _ in range(self.k_samples):
+                if is_ttc:
+                    internal_texts = generated_texts[gen_idx : gen_idx + self.ttc_internal_samples_n]
+                    internal_ids = generated_ids[gen_idx : gen_idx + self.ttc_internal_samples_n]
+                    gen_idx += self.ttc_internal_samples_n
+                    
+                    rewards = [calculate_countdown_reward(t, curr_data_item['nums'], curr_data_item['target'])[0] for t in internal_texts]
+                    best_idx = rewards.index(max(rewards))
+                    
+                    rloo_sample_texts.append(internal_texts[best_idx])
+                    rloo_sample_actions.append(internal_ids[best_idx].to(self.device))
+                else:
+                    rloo_sample_texts.append(generated_texts[gen_idx])
+                    rloo_sample_actions.append(generated_ids[gen_idx].to(self.device))
+                    gen_idx += 1
+                
+                rloo_sample_data_copies.append(curr_data_item)
+
+            all_texts.append(rloo_sample_texts)
+            all_actions.append(rloo_sample_actions)
+            all_data.append(rloo_sample_data_copies)
+
+        self.model.train()
         return all_texts, all_actions, all_data
 
     def _get_log_probs(self, prompt_ids, prompt_mask, batch_actions):
         self.model.train()
-        batch_log_probs = []
+        
+        all_input_ids, all_labels = [], []
+        prompt_lengths = [m.sum().item() for m in prompt_mask]
 
         for i in range(prompt_ids.size(0)):
-            curr_prompt = prompt_ids[i]
-            curr_mask = prompt_mask[i]
-            prompt_len = curr_mask.sum().item()
-            
+            for seq_ids in batch_actions[i]:
+                if len(seq_ids) == 0: continue
+                prompt_len = prompt_lengths[i]
+                curr_prompt = prompt_ids[i, :prompt_len]
+                
+                input_ids = torch.cat([curr_prompt, seq_ids], dim=0)
+                labels = torch.full_like(input_ids, -100)
+                labels[prompt_len:] = seq_ids
+                
+                all_input_ids.append(input_ids)
+                all_labels.append(labels)
+
+        if not all_input_ids:
+            return [[torch.tensor(0.0, device=self.device, requires_grad=True)] * self.k_samples for _ in range(prompt_ids.size(0))]
+
+        padded_input_ids = nn.utils.rnn.pad_sequence(all_input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id).to(self.device)
+        padded_labels = nn.utils.rnn.pad_sequence(all_labels, batch_first=True, padding_value=-100).to(self.device)
+        attention_mask = (padded_input_ids != self.tokenizer.pad_token_id).long()
+        
+        outputs = self.model(input_ids=padded_input_ids, attention_mask=attention_mask, labels=padded_labels)
+        
+        logits = outputs.logits
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = padded_labels[..., 1:].contiguous()
+        
+        loss_fct = nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss = loss.view(shift_logits.size(0), -1)
+
+        loss_mask = (shift_labels != -100)
+        per_sequence_loss = (loss * loss_mask).sum(dim=1)
+        sum_log_probs_flat = -per_sequence_loss
+
+        batch_log_probs, current_idx = [], 0
+        for i in range(prompt_ids.size(0)):
             log_probs = []
             for seq_ids in batch_actions[i]:
                 if len(seq_ids) == 0:
                     log_probs.append(torch.tensor(0.0, device=self.device, requires_grad=True))
-                    continue
-
-                input_ids = torch.cat([curr_prompt[:prompt_len], seq_ids], dim=0).unsqueeze(0)
-                attention_mask = torch.ones_like(input_ids, device=self.device)
-                
-                labels = torch.full_like(input_ids, -100, device=self.device)
-                labels[:, prompt_len:] = seq_ids.unsqueeze(0)
-
-                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
-                
-                num_tokens = seq_ids.numel()
-                if num_tokens > 0:
-                    sum_log_probs = -loss * num_tokens 
                 else:
-                    sum_log_probs = torch.tensor(0.0, device=self.device, requires_grad=True)
-                
-                log_probs.append(sum_log_probs)
+                    log_probs.append(sum_log_probs_flat[current_idx])
+                    current_idx += 1
             batch_log_probs.append(log_probs)
+            
         return batch_log_probs
 
     def _compute_rewards(self, batch_texts, batch_data):
@@ -253,5 +249,6 @@ class RLOOTrainer:
         return metrics
 
     def save_model(self, output_dir):
-        self.model.save_pretrained(output_dir)
+        model_to_save = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        model_to_save.save_pretrained(output_dir)
         self.tokenizer.save_pretrained(output_dir)

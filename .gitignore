@@ -25,6 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+qwen2_warmstart_sft_trainer/
 
 # PyInstaller
 #  Usually these files are written by a script PyInstaller.spec that will be committed to

@@ -5,7 +5,8 @@ import wandb
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset, disable_caching, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup, TrainingArguments, Trainer, DataCollatorForLanguageModeling, IntervalStrategy
+from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup, TrainingArguments, Trainer, DataCollatorForLanguageModeling, IntervalStrategy, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 disable_caching()
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
@@ -56,26 +57,22 @@ def build_and_tokenize_countdown(sample, tokenizer, max_len):
         {"role": "assistant", "content": solution.strip()}
     ]
     
-    prompt_text = tokenizer.apply_chat_template(messages[:1], tokenize=False, add_generation_prompt=True)
-    prompt_ids = tokenizer(prompt_text, add_special_tokens=False, truncation=True, max_length=max_len//2)["input_ids"]
+    tokenized_output = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=False,
+        tokenize=True,
+        max_length=max_len,
+        truncation=True,
+        padding="max_length",  # Pad to max_len to ensure all tensors are the same size for distributed training
+    )
 
-    if len(prompt_ids) >= max_len - 10:
-        return None
-    
-    completion_text = messages[1]["content"].strip() + tokenizer.eos_token
-    comp_ids = tokenizer(completion_text, 
-                         add_special_tokens=False, 
-                         truncation=True,
-                         max_length=max_len - len(prompt_ids))["input_ids"]
-    
-    input_ids = prompt_ids + comp_ids
-    labels = [-100] * len(prompt_ids) + comp_ids
+    labels = list(tokenized_output)
 
-    if len(input_ids) > max_len:
+    if len(labels) > max_len:
         return None
 
     return {
-        "input_ids": input_ids, 
+        "input_ids": labels, 
         "labels": labels
     }
 
@@ -89,38 +86,40 @@ def collate(batch, tok):
 
 def parse_args():
     p = argparse.ArgumentParser()
+    # Core model and data
     p.add_argument("--model_name", default="Qwen/Qwen2-0.5B")
     p.add_argument("--dataset_name", default="Asap7772/cog_behav_all_strategies")
     p.add_argument("--output_dir", default="./qwen2_warmstart_sft_trainer")
-    p.add_argument("--epochs", type=int, default=3)
+    
+    # Training parameters
     p.add_argument("--max_steps", type=int, default=3000)
     p.add_argument("--per_device_train_batch_size", type=int, default=4)
     p.add_argument("--gradient_accumulation_steps", type=int, default=1)
     p.add_argument("--lr", type=float, default=2e-5)
-    p.add_argument("--warmup_ratio", type=float, default=0.01)
     p.add_argument("--max_length", type=int, default=1024)
-    p.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--eval_pct", type=float, default=1.0)
-    p.add_argument("--eval_every", type=int, default=2000)
-    p.add_argument("--log_every", type=int, default=100)
-    p.add_argument("--save_every", type=int, default=10000)
-    p.add_argument("--wandb_project", default="qwen2-warmstart-sft")
-    p.add_argument("--dataset_split", default="train")
-    p.add_argument("--eval_dataset_split", default="test")
-    p.add_argument("--max_eval_samples", type=int, default=500)
+    
+    # Logging and saving
+    p.add_argument("--save_steps", type=int, default=100)
     p.add_argument("--logging_steps", type=int, default=50)
-    p.add_argument("--eval_steps", type=int, default=500)
-    p.add_argument("--save_steps", type=int, default=1000)
-    p.add_argument("--save_total_limit", type=int, default=2)
+    p.add_argument("--save_total_limit", type=int, default=5)
+    
+    # W&B
+    p.add_argument("--wandb_project", default="qwen2-warmstart-sft")
+    p.add_argument("--wandb_run_name", default="Qwen2-0.5B-warmstart-sft")
+    
+    # Optional
+    p.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing to reduce memory usage")
+    
     return p.parse_args()
 
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
-    wandb.init(project=args.wandb_project, config=vars(args), name=f"{args.model_name.split('/')[-1]}-{args.dataset_name.split('/')[-1].replace('cog_behav_all_strategies', 'warmstart')}-sft")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tok.pad_token is None:
@@ -134,98 +133,73 @@ def main():
 
     logger.info(f"Loading dataset: {args.dataset_name}")
     
-    is_streaming = args.streaming
-    raw_train_dataset = load_dataset(args.dataset_name, split=args.dataset_split, streaming=is_streaming)
-    raw_eval_dataset = load_dataset(args.dataset_name, split=args.eval_dataset_split, streaming=False) 
-    if args.max_eval_samples and len(raw_eval_dataset) > args.max_eval_samples:
-         raw_eval_dataset = raw_eval_dataset.select(range(args.max_eval_samples))
+    # Load training dataset
+    raw_train_dataset = load_dataset(args.dataset_name, split="train", streaming=False)
 
-    if is_streaming:
-        logger.info("Using streaming for train dataset")
-        sample = next(iter(raw_train_dataset))
+    if len(raw_train_dataset) > 0:
+        sample = raw_train_dataset[0]
         logger.info(f"Sample train dataset fields: {list(sample.keys())}")
-    else:
-        if len(raw_train_dataset) > 0:
-            sample = raw_train_dataset[0]
-            logger.info(f"Sample train dataset fields: {list(sample.keys())}")
 
     proc_fn = partial(build_and_tokenize_countdown, tokenizer=tok, max_len=args.max_length)
     
-    num_proc = min(os.cpu_count() // 2 if os.cpu_count() else 1, 8) if not is_streaming else None
+    num_proc = min(os.cpu_count() // 2 if os.cpu_count() else 1, 8)
 
     logger.info(f"Mapping train dataset...")
     train_dataset = raw_train_dataset.map(
         proc_fn, 
         batched=False, 
-        remove_columns=raw_train_dataset.column_names if not is_streaming else None
+        num_proc=num_proc,
+        remove_columns=raw_train_dataset.column_names
     ).filter(lambda x: x is not None and "input_ids" in x and len(x["input_ids"]) > 0)
     
-    logger.info("Mapping eval dataset...")
-    eval_dataset = raw_eval_dataset.map(
-        proc_fn, 
-        batched=False, 
-        num_proc=num_proc, 
-        remove_columns=raw_eval_dataset.column_names
-    ).filter(lambda x: x is not None and "input_ids" in x and len(x["input_ids"]) > 0)
-
-    if is_streaming:
-        train_dataset = train_dataset.map(lambda x: {"input_ids": x["input_ids"], "labels": x["labels"]}, batched=False)
-        
-    if not is_streaming and isinstance(train_dataset, Dataset):
+    if isinstance(train_dataset, Dataset):
         train_dataset = train_dataset.shuffle(seed=42)
 
-    logger.info(f"Processed train dataset samples: {len(train_dataset) if not is_streaming else 'streaming'}")
-    logger.info(f"Processed eval dataset samples: {len(eval_dataset)}")
+    logger.info(f"Processed train dataset samples: {len(train_dataset)}")
 
     data_collator = partial(collate, tok=tok)
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        max_steps=args.max_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_train_batch_size * 2,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
-        warmup_ratio=args.warmup_ratio,
-        logging_dir=f"{args.output_dir}/logs",
-        logging_strategy="steps",
         logging_steps=args.logging_steps,
-        save_strategy="steps",
+        max_steps=args.max_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
-        fp16=False,
         report_to="wandb",
-        dataloader_num_workers=0,
-        remove_unused_columns=False,
+        run_name=args.wandb_run_name,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
-
-    def compute_metrics(eval_preds):
-        return {"eval_loss": 0.0}
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        data_collator=DataCollatorForLanguageModeling(tokenizer=tok, mlm=False),
         tokenizer=tok,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
     )
 
     logger.info("Starting training...")
-    train_result = trainer.train()
+    
+    # Check for existing checkpoints and resume if available
+    resume_from_checkpoint = None
+    if os.path.exists(args.output_dir):
+        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")]
+        if checkpoints:
+            # Sort by checkpoint number and get the latest
+            latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))[-1]
+            resume_from_checkpoint = os.path.join(args.output_dir, latest_checkpoint)
+            logger.info(f"Resuming training from {resume_from_checkpoint}")
+    
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     
     logger.info("Training finished. Saving...")
     trainer.save_model()
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
-
-    logger.info("Evaluating...")
-    eval_metrics = trainer.evaluate()
-    logger.info(f"Final evaluation metrics: {eval_metrics}")
-    trainer.log_metrics("eval", eval_metrics)
-    trainer.save_metrics("eval", eval_metrics)
     
     if wandb.run:
         wandb.finish()
