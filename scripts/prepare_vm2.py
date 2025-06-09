@@ -17,8 +17,8 @@ def run_command(command):
 
 def prepare_vm(ssh_user, ssh_ip, ssh_port):
   # Ensure WANDB_API_KEY is in environment variables
-  HOME=f'/home/{ssh_user}'
-  #HOME='/root/'
+  #HOME=f'/home/{ssh_user}'
+  HOME='/root/'
   wandb_api_key = os.getenv('WANDB_API_KEY')
   if not wandb_api_key:
     print("Error: WANDB_API_KEY environment variable is not set.")
