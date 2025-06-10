@@ -9,6 +9,7 @@ import wandb
 import logging
 
 from src.utils.countdown_reward import calculate_countdown_reward
+from src.utils.countdown import compute_score
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,11 @@ class RLOOTrainer:
             generated_outputs = model_to_generate.generate(
                 input_ids=expanded_prompt_ids,
                 attention_mask=expanded_prompt_mask,
-                max_new_tokens=self.max_length_generation,
-                temperature=self.temperature,
-                do_sample=True,
+                                max_new_tokens=self.max_length_generation,
+                                temperature=self.temperature,
+                                do_sample=True,
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                                eos_token_id=self.tokenizer.eos_token_id,
             )
 
         generated_ids = generated_outputs[:, prompt_len:]
@@ -86,8 +87,8 @@ class RLOOTrainer:
             all_texts.append(rloo_sample_texts)
             all_actions.append(rloo_sample_actions)
             all_data.append(rloo_sample_data_copies)
-
-        self.model.train()
+        
+        self.model.train() 
         return all_texts, all_actions, all_data
 
     def _get_log_probs(self, prompt_ids, prompt_mask, batch_actions):
@@ -116,7 +117,20 @@ class RLOOTrainer:
         padded_labels = nn.utils.rnn.pad_sequence(all_labels, batch_first=True, padding_value=-100).to(self.device)
         attention_mask = (padded_input_ids != self.tokenizer.pad_token_id).long()
         
-        outputs = self.model(input_ids=padded_input_ids, attention_mask=attention_mask, labels=padded_labels)
+        # Handle potential DataParallel issues with uneven batch sizes
+        model_to_use = self.model
+        is_data_parallel = isinstance(self.model, nn.DataParallel)
+        if is_data_parallel:
+            num_gpus = torch.cuda.device_count()
+            batch_size = padded_input_ids.size(0)
+            if batch_size > 0 and (batch_size % num_gpus != 0 or batch_size < num_gpus):
+                logger.warning(
+                    f"Batch size {batch_size} is not suitable for {num_gpus} GPUs. "
+                    f"Running this batch on a single device to avoid NCCL errors."
+                )
+                model_to_use = self.model.module
+
+        outputs = model_to_use(input_ids=padded_input_ids, attention_mask=attention_mask, labels=padded_labels)
         
         logits = outputs.logits
         shift_logits = logits[..., :-1, :].contiguous()
@@ -146,6 +160,7 @@ class RLOOTrainer:
     def _compute_rewards(self, batch_texts, batch_data):
         batch_rewards = []
         batch_actual_rewards = []
+        batch_sparse_rewards = []
 
         cost_penalty = 0.0
         if self.ttc_lambda_cost > 0 and self.ttc_internal_samples_n > 0:
@@ -154,42 +169,54 @@ class RLOOTrainer:
         for i in range(len(batch_texts)):
             rewards = []
             actual_rewards = []
+            sparse_rewards = []
             for j in range(len(batch_texts[i])):
                 text = batch_texts[i][j]
                 data = batch_data[i][j]
                 numbers = data['nums'] 
                 target = data['target']
                 
-                actual_reward_val, _, _, _ = calculate_countdown_reward(text, numbers, target)
+                ground_truth = {'numbers': numbers, 'target': target}
+                
+                # Use the official sparse reward for training to enforce format
+                sparse_reward_val = compute_score(solution_str=text, ground_truth=ground_truth)
+                
+                # We will use this for both training and monitoring
+                actual_reward_val = sparse_reward_val
+                
                 actual_rewards.append(actual_reward_val)
+                sparse_rewards.append(sparse_reward_val)
 
                 adjusted_reward_val = actual_reward_val - cost_penalty
                 rewards.append(adjusted_reward_val)
 
             batch_rewards.append(rewards)
             batch_actual_rewards.append(actual_rewards)
-        return batch_rewards, batch_actual_rewards
+            batch_sparse_rewards.append(sparse_rewards)
+        return batch_rewards, batch_actual_rewards, batch_sparse_rewards
 
     def train_step(self, batch_prompts, batch_masks, batch_texts, batch_data):
         all_texts, all_actions, all_data = self._generate_samples(batch_prompts, batch_masks, batch_data)
         
-        batch_rewards, batch_actual_rewards = self._compute_rewards(all_texts, all_data)
+        batch_rewards, batch_actual_rewards, batch_sparse_rewards = self._compute_rewards(all_texts, all_data)
 
         all_log_probs = self._get_log_probs(batch_prompts, batch_masks, all_actions)
 
         policy_loss = torch.tensor(0.0, device=self.device)
         total_adjusted_reward = 0.0
         total_actual_reward = 0.0
+        total_sparse_reward = 0.0
         num_samples = 0
         
         batch_size = len(batch_rewards)
         if batch_size == 0:
-            return {"loss": 0.0, "avg_reward": 0.0, "avg_actual_reward": 0.0}
+            return {"loss": 0.0, "avg_reward": 0.0, "avg_actual_reward": 0.0, "avg_sparse_reward": 0.0}
 
         for i in range(batch_size):
             log_probs = all_log_probs[i]  
             rewards = batch_rewards[i]
             actual_rewards_for_prompt = batch_actual_rewards[i]
+            sparse_rewards_for_prompt = batch_sparse_rewards[i]
 
             if not log_probs or not rewards:
                 continue
@@ -199,11 +226,13 @@ class RLOOTrainer:
                     policy_loss = policy_loss - log_probs[0] * rewards[0] 
                     total_adjusted_reward += rewards[0]
                     total_actual_reward += actual_rewards_for_prompt[0]
+                    total_sparse_reward += sparse_rewards_for_prompt[0]
                     num_samples += 1
             else:
                 for j in range(min(len(log_probs), len(rewards))):
                     curr_reward = rewards[j]
                     curr_actual_reward = actual_rewards_for_prompt[j]
+                    curr_sparse_reward = sparse_rewards_for_prompt[j]
                     curr_log_prob = log_probs[j]
                     
                     baseline = 0.0
@@ -215,16 +244,19 @@ class RLOOTrainer:
                     
                     total_adjusted_reward += curr_reward
                     total_actual_reward += curr_actual_reward
+                    total_sparse_reward += curr_sparse_reward
                     num_samples += 1
         
         avg_adjusted_reward = 0.0
         avg_actual_reward = 0.0
+        avg_sparse_reward = 0.0
         avg_internal_samples = self.ttc_internal_samples_n
 
         if num_samples > 0:
             policy_loss = policy_loss / num_samples 
             avg_adjusted_reward = total_adjusted_reward / num_samples
             avg_actual_reward = total_actual_reward / num_samples
+            avg_sparse_reward = total_sparse_reward / num_samples
         
         if torch.is_tensor(policy_loss) and policy_loss.requires_grad:
             loss_scaled = policy_loss / self.gradient_accumulation_steps
@@ -240,7 +272,8 @@ class RLOOTrainer:
 
         metrics = {
             "loss": policy_loss.item() if torch.is_tensor(policy_loss) else float(policy_loss),
-            "avg_reward": avg_adjusted_reward
+            "avg_reward": avg_adjusted_reward,
+            "avg_sparse_reward": avg_sparse_reward
         }
         if self.ttc_lambda_cost > 0:
             metrics["avg_actual_reward"] = avg_actual_reward

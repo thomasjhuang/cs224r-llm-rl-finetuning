@@ -26,7 +26,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 qwen2_warmstart_sft_trainer/
-
+rloo_baseline_run1/
+rloo_performance_k8_s100/
 # PyInstaller
 #  Usually these files are written by a script PyInstaller.spec that will be committed to
 #  the repository. Make sure to ignore them if they are not committed. .

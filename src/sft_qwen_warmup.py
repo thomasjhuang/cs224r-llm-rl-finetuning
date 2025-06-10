@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import os, math, argparse, logging, time
+import os, math, argparse, logging, time, re
 from functools import partial
 import wandb
 import torch
@@ -23,7 +23,14 @@ def build_and_tokenize_countdown(sample, tokenizer, max_len):
     if build_and_tokenize_countdown.call_count <= 3:
         logger.info(f"Sample {build_and_tokenize_countdown.call_count} keys: {list(sample.keys())}")
 
-    if 'query' in sample and 'completion' in sample:
+    if 'text' in sample:
+        text = sample['text']
+        if "User:" in text and "Assistant:" in text:
+            # Split based on the Assistant cue, assuming User part is the problem
+            parts = text.split("Assistant:", 1)
+            problem = parts[0].replace("User:", "").strip()
+            solution = parts[1].strip()
+    elif 'query' in sample and 'completion' in sample:
         problem = sample['query']
         solution = sample['completion']
     elif 'problem' in sample and 'solution' in sample:
@@ -140,16 +147,31 @@ def main():
         sample = raw_train_dataset[0]
         logger.info(f"Sample train dataset fields: {list(sample.keys())}")
 
+    def is_countdown_style_problem(sample):
+        # Check both query and completion for countdown-related content
+        problem_text = sample.get('query', '').lower()
+        solution_text = sample.get('completion', '').lower()
+        
+        # Check for specific markers of the countdown format
+        is_countdown_query = "using the numbers" in problem_text and "create an equation" in problem_text
+        has_tags = "<think>" in solution_text and "</answer>" in solution_text
+        
+        return is_countdown_query and has_tags
+
+    logger.info("Filtering dataset for Countdown-style problems...")
+    filtered_train_dataset = raw_train_dataset.filter(is_countdown_style_problem, num_proc=4)
+    logger.info(f"Original dataset size: {len(raw_train_dataset)}. Filtered dataset size: {len(filtered_train_dataset)}")
+
     proc_fn = partial(build_and_tokenize_countdown, tokenizer=tok, max_len=args.max_length)
     
     num_proc = min(os.cpu_count() // 2 if os.cpu_count() else 1, 8)
 
     logger.info(f"Mapping train dataset...")
-    train_dataset = raw_train_dataset.map(
+    train_dataset = filtered_train_dataset.map(
         proc_fn, 
         batched=False, 
         num_proc=num_proc,
-        remove_columns=raw_train_dataset.column_names
+        remove_columns=filtered_train_dataset.column_names
     ).filter(lambda x: x is not None and "input_ids" in x and len(x["input_ids"]) > 0)
     
     if isinstance(train_dataset, Dataset):
@@ -170,7 +192,7 @@ def main():
         save_total_limit=args.save_total_limit,
         report_to="wandb",
         run_name=args.wandb_run_name,
-        gradient_checkpointing=args.gradient_checkpointing,
+        gradient_checkpointing=True,
     )
 
     trainer = Trainer(

@@ -53,13 +53,7 @@ def parse_args():
 
 def prepare_prompt_for_generation(sample, tokenizer, use_cot=True):
     numbers_str = ", ".join(map(str, sample['nums']))
-    
-    if use_cot:
-        # Chain-of-Thought prompt for TTC
-        problem_text = f"Using the numbers [{numbers_str}], create an equation that equals {sample['target']}. Think step by step and show your reasoning."
-    else:
-        # Direct prompt (vanilla)
-        problem_text = f"Using the numbers [{numbers_str}], create an equation that equals {sample['target']}."
+    problem_text = f"Numbers: [{numbers_str}]\nTarget: {sample['target']}"
     
     messages = [{"role": "user", "content": problem_text}]
     prompt_chat_template = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -87,6 +81,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
     
     logger.info(f"Loading SFT model from: {args.sft_model_path}")
     model = AutoModelForCausalLM.from_pretrained(args.sft_model_path, torch_dtype=torch.float32)
@@ -109,7 +104,7 @@ def main():
         return tokenized_prompts['input_ids'], tokenized_prompts['attention_mask'], prompt_texts, original_datas
 
     # Use Chain-of-Thought prompting when TTC is enabled
-    use_cot = args.ttc_internal_samples_n > 1 and args.ttc_lambda_cost > 0
+    use_cot = False # Keep False for vanilla RLOO
     processed_prompt_dataset = prompt_dataset.map(lambda x: prepare_prompt_for_generation(x, tokenizer, use_cot), batched=False)
     
     prompt_dataloader = DataLoader(processed_prompt_dataset, batch_size=args.batch_size, collate_fn=collate_fn, shuffle=True)
