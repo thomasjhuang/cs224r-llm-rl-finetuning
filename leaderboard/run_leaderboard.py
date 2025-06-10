@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class VLLMProcessor:
     def __init__(self, endpoint_url: str, model_name: str = None, max_tokens: int = 2048,
-                 temperature: float = 0.7, request_timeout: int = 60):
+                 temperature: float = 0.6, request_timeout: int = 60, top_k=0, top_p=0.95):
         """
         Initialize the vLLM processor.
 
@@ -28,6 +28,8 @@ class VLLMProcessor:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.request_timeout = request_timeout
+        self.top_p = top_p
+        self.top_k = top_k
 
     def make_api_call(self, prompt: str) -> str:
         """
@@ -46,7 +48,8 @@ class VLLMProcessor:
             }],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "top_p": 0.9,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
             "stop": None,
             "presence_penalty": 0.0,
             "frequency_penalty": 0,
@@ -184,7 +187,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=60, help="Request timeout in seconds")
     parser.add_argument("--resume", action="store_true",
                        help="Resume processing (skip entries with existing responses)")
-
+    parser.add_argument("--top_k", type=int, default=0)
+    parser.add_argument("--top_p", type=float, default=0.95)
     args = parser.parse_args()
 
     # Initialize processor
@@ -193,7 +197,9 @@ def main():
         model_name=args.model,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
-        request_timeout=args.timeout
+        request_timeout=args.timeout,
+        top_p=args.top_p,
+        top_k=args.top_k
     )
 
     # Process file
